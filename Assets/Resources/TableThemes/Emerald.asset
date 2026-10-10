@@ -1,0 +1,28 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 1b2b33ddcc85aa24094b2cba0b9c2470, type: 3}
+  m_Name: Emerald
+  m_EditorClassIdentifier: Assembly-CSharp::Drawmaha.TableTheme
+  DisplayName: Emerald
+  Background: {r: 0.025, g: 0.043, b: 0.055, a: 1}
+  Felt: {r: 0.055, g: 0.27, b: 0.24, a: 1}
+  Rail: {r: 0.08, g: 0.12, b: 0.14, a: 1}
+  Accent: {r: 0.96, g: 0.75, b: 0.38, a: 1}
+  CardBack: {r: 0.09, g: 0.23, b: 0.3, a: 1}
+  CardFace: {r: 0.96, g: 0.95, b: 0.92, a: 1}
+  BackgroundImage: {fileID: 0}
+  TableImage: {fileID: 0}
+  CardBackImage: {fileID: 0}
+  CardFaceImage: {fileID: 0}
+  Avatars: []
+  CardDealSeconds: 0.14
+  BoardDealSeconds: 0.38
