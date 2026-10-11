@@ -66,6 +66,17 @@ namespace Drawmaha
         }
         public void Note(string message) { Log.Add(message); if (Log.Count > 160) Log.RemoveAt(0); }
         public void StartHand() { StartHand(null); }
+        public void ResetCompletedHandForWaiting()
+        {
+            if (Stage != Street.Complete) throw new InvalidOperationException("Only a completed hand can be reset.");
+            Board.Clear(); Results.Clear(); pending.Clear(); Actor = -1; Stage = Street.Waiting;
+            CurrentBet = 0; LastRaise = BigBlind; LastPot = contestablePot = 0; ShowdownReached = false;
+            foreach (var player in Players)
+            {
+                player.Bet = player.Contributed = player.DrawCount = player.Payout = 0;
+                player.Folded = player.InHand = player.Scoop = false; player.Cards.Clear(); player.Action = "Waiting";
+            }
+        }
         public void StartHand(HandSetup setup)
         {
             if (Stage != Street.Waiting && Stage != Street.Complete) throw new InvalidOperationException("Finish the current hand first.");

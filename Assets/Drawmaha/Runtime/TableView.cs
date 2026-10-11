@@ -29,10 +29,11 @@ namespace Drawmaha
         readonly Vector2[] betPositions = { new Vector2(960, 628), new Vector2(610, 604), new Vector2(610, 410), new Vector2(960, 327), new Vector2(1310, 410), new Vector2(1310, 604) };
         GUIStyle text, small, bold, title, button, accentButton, input;
         string endpoint = "ws://localhost:8080/ws", username = "", invite = "", error = "", lastTable = "";
-        bool post, showHistory, showRules, showSettings;
+        bool post, showMenu, showHistory, showRules, showSettings;
         Vector2 historyScroll;
         int lastHand = -1, shownBoard, lastActor = -99;
-        float handStarted, nextBoardAt, raiseTo, errorUntil, turnTimerStartedAt, turnTimerDuration;
+        float handStarted, nextBoardAt, raiseTo, errorUntil, leaveNoticeUntil, turnTimerStartedAt, turnTimerDuration;
+        string leaveNotice = "";
         TableState previous;
         Color Ink { get { return new Color(0.91f, 0.94f, 0.96f); } }
         Color Dim { get { return new Color(0.53f, 0.64f, 0.68f); } }
@@ -74,7 +75,7 @@ namespace Drawmaha
             LoadCardStyleAssets();
             backgroundIndex = FindImageIndex(backgrounds, "drawmaha.background.asset", "BeachBackground");
             tableIndex = FindImageIndex(pokerTables, "drawmaha.pokertable.asset", "BeachPokerTable");
-            endpoint = PlayerPrefs.GetString("drawmaha.endpoint", endpoint); username = PlayerPrefs.GetString("drawmaha.username", "");
+            PlayerPrefs.DeleteKey("drawmaha.endpoint"); username = PlayerPrefs.GetString("drawmaha.username", "");
             network = gameObject.AddComponent<MultiplayerClient>();
             network.StateChanged += Received;
             network.Failure += s => { error = s; errorUntil = Time.unscaledTime + 8; };
@@ -138,6 +139,13 @@ namespace Drawmaha
         void Received(TableState state)
         {
             if (state == null) return;
+            bool wasLeaving = previous != null && previous.yourSeat >= 0 && previous.players[previous.yourSeat].leaving;
+            bool isLeaving = state.yourSeat >= 0 && state.players[state.yourSeat].leaving;
+            if (isLeaving && (previous == null || !wasLeaving))
+            {
+                leaveNotice = "You will leave after this hand.";
+                leaveNoticeUntil = Time.unscaledTime + 3.5f;
+            }
             if (state.id != lastTable || state.hand != lastHand)
             {
                 lastTable = state.id; lastHand = state.hand; handStarted = Time.unscaledTime;
@@ -305,29 +313,40 @@ namespace Drawmaha
             Fill(new Rect(0, 0, W, H), new Color(0.025f, 0.035f, 0.045f));
             if (BackgroundImage != null) GUI.DrawTexture(new Rect(0, 0, W, H), BackgroundImage, ScaleMode.ScaleAndCrop, true);
             bool wasEnabled = GUI.enabled; GUI.enabled = !showRules && !showHistory && !showSettings;
-            Fill(new Rect(0, 0, W, 105), new Color(0.018f, 0.035f, 0.055f, 0.88f));
-            Label(42, 19, 400, 46, "DRAWMAHA", title);
-            Label(45, 66, 790, 24, currentTable == null ? "MULTIPLAYER  /  FIND YOUR TABLE" : currentTable.name.ToUpperInvariant() + "  /  " + currentTable.smallBlind + "–" + currentTable.bigBlind + "  /  POT LIMIT", small);
-            if (Button(new Rect(1204, 27, 154, 48), "Settings")) showSettings = true;
-            if (Button(new Rect(1370, 27, 112, 48), "Rules")) showRules = true;
-            if (Button(new Rect(1494, 27, 132, 48), "History", currentTable != null)) showHistory = true;
-            bool canLeave = currentTable == null || currentTable.stage == "Complete";
-            if (currentTable != null && currentTable.yourSeat >= 0)
+            Rect menuButton = new Rect(24, 24, 56, 56);
+            if (GUI.Button(menuButton, new GUIContent("", showMenu ? "Close menu" : "Open menu"), button)) showMenu = !showMenu;
+            Fill(new Rect(39, 39, 26, 3), Ink, white);
+            Fill(new Rect(39, 50, 26, 3), Ink, white);
+            Fill(new Rect(39, 61, 26, 3), Ink, white);
+            if (!network.Connected && previewTable == null) ConnectScreen();
+            else if (currentTable == null) Lobby();
+            else Table();
+            if (showMenu) Menu(currentTable);
+            if (Time.unscaledTime < leaveNoticeUntil)
             {
-                var own = currentTable.players[currentTable.yourSeat];
-                canLeave |= !own.inHand || own.folded;
+                Rect banner = new Rect((W - 480) / 2, 24, 480, 52);
+                Fill(banner, Panel, rounded);
+                Fill(new Rect(banner.x, banner.y, 4, banner.height), Accent, white);
+                Label(banner.x + 18, banner.y, banner.width - 30, banner.height, leaveNotice,
+                    Style(17, Ink, FontStyle.Bold, TextAnchor.MiddleCenter));
             }
-            string leaveLabel = currentTable == null ? "Disconnect" : canLeave ? "Leave after hand" : "Fold before leaving";
-            if (Button(new Rect(1638, 27, 240, 48), leaveLabel, network.Connected && !network.CommandPending && canLeave))
-            {
-                if (currentTable != null) network.Send(new Command { type = "leave" }); else network.Disconnect();
-            }
-            Fill(new Rect(40, 101, 1840, 1), new Color(0.35f, 0.49f, 0.56f, 0.55f));
-            if (currentTable == null) Lobby(); else Table();
             Label(42, 1038, 1470, 25, Time.unscaledTime < errorUntil ? error : network.Status + (previewTable != null ? "  ·  Visual preview" : "  ·  Play chips"), small);
             GUI.enabled = wasEnabled;
             if (showRules) Rules(); if (showHistory) History(); if (showSettings) Settings();
             GUI.matrix = old;
+        }
+        void Menu(TableState currentTable)
+        {
+            Fill(new Rect(24, 90, 270, 250), Panel, rounded);
+            if (Button(new Rect(38, 102, 242, 48), "Settings")) { showSettings = true; showMenu = false; }
+            if (Button(new Rect(38, 158, 242, 48), "Rules")) { showRules = true; showMenu = false; }
+            if (Button(new Rect(38, 214, 242, 48), "History", currentTable != null)) { showHistory = true; showMenu = false; }
+            bool canLeaveTable = network.Connected && currentTable != null && currentTable.yourSeat >= 0
+                && !currentTable.players[currentTable.yourSeat].leaving && !network.CommandPending;
+            if (Button(new Rect(38, 270, 242, 48), "Leave Table", canLeaveTable))
+            {
+                network.Send(new Command { type = "leave" }); showMenu = false;
+            }
         }
         void Lobby()
         {
@@ -335,33 +354,46 @@ namespace Drawmaha
             GUI.matrix = oldMatrix * Matrix4x4.Translate(new Vector3(160, 40, 0));
             Fill(new Rect(250, 159, 1100, 751), Panel); Label(286, 187, 600, 45, "TAKE A SEAT", title);
             Label(286, 239, 960, 38, "Six seats per table. Hands begin automatically with two players.", small);
-            Label(286, 294, 180, 26, "Server address", small); endpoint = GUI.TextField(new Rect(286, 326, 680, 47), endpoint, input);
-            Label(987, 294, 285, 26, "Username", small); username = GUI.TextField(new Rect(987, 326, 325, 47), username, 20, input);
-            Label(286, 386, 260, 26, "Invite key", small); invite = GUI.PasswordField(new Rect(286, 417, 520, 47), invite, '*', 128, input);
-            if (Button(new Rect(826, 417, 204, 47), "Avatar " + (avatarIndex + 1))) avatarIndex = (avatarIndex + 1) % 8;
-            if (Button(new Rect(1050, 417, 262, 47), network.Connected ? "Connected" : "Connect", !network.Connected, true))
-            {
-                PlayerPrefs.SetString("drawmaha.endpoint", endpoint); PlayerPrefs.SetString("drawmaha.username", username); PlayerPrefs.Save();
-                network.Connect(endpoint, username, avatarIndex, invite);
-            }
-            if (Button(new Rect(1050, 478, 262, 33), "Forget saved identity", !network.Connected)) network.ForgetSession(endpoint, username);
-            Label(286, 497, 720, 28, "Entry preference:", small);
-            if (Button(new Rect(470, 487, 227, 40), post ? "Post big blind ✓" : "Post big blind")) post = true;
-            if (Button(new Rect(710, 487, 299, 40), post ? "Wait for big blind" : "Wait for big blind ✓")) post = false;
-            Label(286, 561, 350, 26, "TABLE", small); Label(647, 561, 160, 26, "BLINDS", small);
-            Label(832, 561, 180, 26, "BUY-IN", small); Label(1020, 561, 170, 26, "SEATS FILLED", small);
+            Label(286, 294, 720, 28, "Entry preference:", small);
+            if (Button(new Rect(470, 326, 227, 40), post ? "Post big blind ✓" : "Post big blind")) post = true;
+            if (Button(new Rect(710, 326, 299, 40), post ? "Wait for big blind" : "Wait for big blind ✓")) post = false;
+            Label(286, 392, 350, 26, "TABLE", small); Label(647, 392, 160, 26, "BLINDS", small);
+            Label(832, 392, 180, 26, "BUY-IN", small); Label(1020, 392, 170, 26, "SEATS FILLED", small);
             var rows = network.Tables;
             for (int i = 0; i < rows.Length; i++)
             {
-                var row = rows[i]; float y = 602 + i * 83;
+                var row = rows[i]; float y = 426 + i * 83;
                 Fill(new Rect(276, y, 1044, 70), new Color(0.075f, 0.12f, 0.15f));
                 Label(294, y + 20, 335, 35, row.name, bold); Label(649, y + 22, 160, 32, row.smallBlind + " / " + row.bigBlind);
                 Label(834, y + 22, 170, 32, row.buyIn.ToString("N0")); Label(1020, y + 22, 145, 32, row.occupied + " / " + row.maxSeats);
                 if (Button(new Rect(1180, y + 13, 121, 43), "Join", network.Connected && row.available > 0 && !network.CommandPending, true))
                     network.Send(new Command { type = "join", tableId = row.id, entryMode = post ? "post" : "wait" });
             }
-            if (rows.Length == 0) Label(286, 632, 1000, 80, "Connect to your server to see available tables.\nFor a local test, run the server and open two game clients.", small);
+            if (rows.Length == 0) Label(286, 456, 1000, 80, "No tables are available right now.", small);
             Label(286, 867, 1015, 30, "New arrivals join at a hand boundary. Posting is unavailable on the button or between the button and big blind.", Style(14, Dim));
+            GUI.matrix = oldMatrix;
+        }
+        void ConnectScreen()
+        {
+            Matrix4x4 oldMatrix = GUI.matrix;
+            GUI.matrix = oldMatrix * Matrix4x4.Translate(new Vector3(160, 40, 0));
+            Fill(new Rect(250, 159, 1100, 751), Panel);
+            Label(286, 187, 600, 45, "WELCOME TO DRAWMAHA", title);
+            Label(286, 239, 960, 38, "Enter your player details to find an open table.", small);
+            Label(286, 321, 285, 26, "Username", small);
+            username = GUI.TextField(new Rect(286, 354, 520, 47), username, 20, input);
+            Label(286, 428, 285, 26, "Invite code", small);
+            invite = GUI.PasswordField(new Rect(286, 461, 520, 47), invite, '*', 128, input);
+            if (Button(new Rect(826, 461, 204, 47), "Avatar " + (avatarIndex + 1))) avatarIndex = (avatarIndex + 1) % 8;
+            bool connecting = network.Status == "Connecting…";
+            if (Button(new Rect(1050, 461, 262, 47), connecting ? "Connecting…" : "Connect", !connecting, true))
+            {
+                PlayerPrefs.SetString("drawmaha.username", username);
+                PlayerPrefs.Save();
+                network.Connect(endpoint, username, avatarIndex, invite);
+            }
+            if (Button(new Rect(1050, 522, 262, 33), "Forget saved identity", !connecting)) network.ForgetSession(endpoint, username);
+            Label(286, 861, 900, 30, "Your invite code is used to join your private game server.", Style(14, Dim));
             GUI.matrix = oldMatrix;
         }
         void Table()
@@ -375,6 +407,13 @@ namespace Drawmaha
                 GUI.DrawTexture(new Rect((W - imageWidth) / 2, (H - imageHeight) / 2, imageWidth, imageHeight), PokerTableImage, ScaleMode.StretchToFill, true);
             }
             else Fill(new Rect(160, 245, 1600, 625), Color.white, felt);
+            if (t.stage == "Waiting")
+            {
+                for (int i = 0; i < 6; i++) Seat(t, i);
+                Label(560, 495, 800, 70, "Waiting for players", Style(30, Ink, FontStyle.Bold, TextAnchor.MiddleCenter));
+                Controls(t);
+                return;
+            }
             Label(720, 386, 480, 32, "POT  " + t.pot.ToString("N0"), Style(24, Color.black, FontStyle.Bold, TextAnchor.MiddleCenter));
             for (int i = 0; i < shownBoard; i++)
             {
@@ -443,11 +482,16 @@ namespace Drawmaha
         void DrawSeatPanel(SeatView p, Rect box, bool acting)
         {
             Rect actionBox = new Rect(box.center.x - 64, box.yMax - 4, 128, 28);
+            Rect avatarBox = new Rect(box.x + 8, box.y + 9, 44, 44);
             Fill(actionBox, new Color(0.045f, 0.105f, 0.145f, 0.98f), rounded);
             Fill(box, new Color(0.025f, 0.075f, 0.13f, 0.98f), rounded);
-            Label(box.x + 8, box.y + 6, box.width - 16, 23, p.username,
+            Fill(new Rect(avatarBox.x - 2, avatarBox.y - 2, avatarBox.width + 4, avatarBox.height + 4), new Color(0.72f, 0.82f, 0.86f), round);
+            Fill(avatarBox, AvatarColor(p.avatar), round);
+            Label(avatarBox.x, avatarBox.y, avatarBox.width, avatarBox.height, AvatarInitials(p.username),
+                Style(17, Color.white, FontStyle.Bold, TextAnchor.MiddleCenter));
+            Label(box.x + 60, box.y + 6, box.width - 68, 23, p.username,
                 Style(15, Ink, FontStyle.Bold, TextAnchor.MiddleCenter));
-            Label(box.x + 8, box.y + 33, box.width - 16, 23, p.stack.ToString("N0") + " Chips",
+            Label(box.x + 60, box.y + 33, box.width - 68, 23, p.stack.ToString("N0") + " Chips",
                 Style(17, Accent, FontStyle.Normal, TextAnchor.MiddleCenter));
             Label(actionBox.x + 4, actionBox.y, actionBox.width - 8, actionBox.height, PlayerAction(p),
                 Style(13, Accent, FontStyle.Bold, TextAnchor.MiddleCenter));
@@ -459,74 +503,40 @@ namespace Drawmaha
         }
         void DrawFuseOutline(Rect box, float remaining)
         {
-            Rect outline = new Rect(box.x - 3, box.y - 3, box.width + 6, box.height + 6);
-            float radius = Mathf.Min(9f, outline.height * 0.2f);
-            float topStraight = outline.width * 0.5f - radius;
-            float cornerArc = Mathf.PI * radius * 0.5f;
-            float sideStraight = outline.height - 2 * radius;
-            float bottomStraight = outline.width - 2 * radius;
-            float perimeter = 2 * topStraight + 4 * cornerArc + 2 * sideStraight + bottomStraight;
-            float erased = perimeter * (1f - remaining);
-            const float segmentLength = 4f;
-            for (float distance = erased; distance < perimeter; distance += segmentLength)
-            {
-                float end = Mathf.Min(distance + segmentLength, perimeter);
-                DrawFuseSegment(FusePoint(outline, distance, radius), FusePoint(outline, end, radius), Accent, 3f);
-            }
+            Rect outline = new Rect(box.x - 1.5f, box.y - 1.5f, box.width + 3, box.height + 3);
+            float topHalf = outline.width * 0.5f;
+            float perimeter = 2 * (outline.width + outline.height);
+            float elapsed = perimeter * (1f - remaining);
+            const float thickness = 3f;
+            float cursor = 0;
+            DrawFuseHorizontal(outline.center.x, outline.y, topHalf, cursor, elapsed, false, thickness); cursor += topHalf;
+            DrawFuseVertical(outline.xMax, outline.y, outline.height, cursor, elapsed, false, thickness); cursor += outline.height;
+            DrawFuseHorizontal(outline.xMax, outline.yMax, outline.width, cursor, elapsed, true, thickness); cursor += outline.width;
+            DrawFuseVertical(outline.x, outline.yMax, outline.height, cursor, elapsed, true, thickness); cursor += outline.height;
+            DrawFuseHorizontal(outline.center.x, outline.y, topHalf, cursor, elapsed, true, thickness);
         }
-        static Vector2 FusePoint(Rect rect, float distance, float radius)
+        void DrawFuseHorizontal(float pathX, float y, float length, float segmentStart, float elapsed, bool reverse, float thickness)
         {
-            float topStraight = rect.width * 0.5f - radius;
-            float cornerArc = Mathf.PI * radius * 0.5f;
-            float sideStraight = rect.height - 2 * radius;
-            float bottomStraight = rect.width - 2 * radius;
-            Vector2 center = new Vector2(rect.center.x, rect.y);
-            if (distance <= topStraight) return center + Vector2.right * distance;
-            distance -= topStraight;
-            if (distance <= cornerArc)
-            {
-                float angle = -Mathf.PI * 0.5f + distance / radius;
-                return new Vector2(rect.xMax - radius + Mathf.Cos(angle) * radius, rect.y + radius + Mathf.Sin(angle) * radius);
-            }
-            distance -= cornerArc;
-            if (distance <= sideStraight) return new Vector2(rect.xMax, rect.y + radius + distance);
-            distance -= sideStraight;
-            if (distance <= cornerArc)
-            {
-                float angle = distance / radius;
-                return new Vector2(rect.xMax - radius + Mathf.Cos(angle) * radius, rect.yMax - radius + Mathf.Sin(angle) * radius);
-            }
-            distance -= cornerArc;
-            if (distance <= bottomStraight) return new Vector2(rect.xMax - radius - distance, rect.yMax);
-            distance -= bottomStraight;
-            if (distance <= cornerArc)
-            {
-                float angle = Mathf.PI * 0.5f + distance / radius;
-                return new Vector2(rect.x + radius + Mathf.Cos(angle) * radius, rect.yMax - radius + Mathf.Sin(angle) * radius);
-            }
-            distance -= cornerArc;
-            if (distance <= sideStraight) return new Vector2(rect.x, rect.yMax - radius - distance);
-            distance -= sideStraight;
-            if (distance <= cornerArc)
-            {
-                float angle = Mathf.PI + distance / radius;
-                return new Vector2(rect.x + radius + Mathf.Cos(angle) * radius, rect.y + radius + Mathf.Sin(angle) * radius);
-            }
-            return new Vector2(rect.center.x, rect.y);
+            float offset = Mathf.Clamp(elapsed - segmentStart, 0, length);
+            float visibleLength = length - offset;
+            if (visibleLength <= 0) return;
+            float x = reverse ? pathX - offset - visibleLength : pathX + offset;
+            Fill(new Rect(x, y - thickness * 0.5f, visibleLength, thickness), Accent, white);
         }
-        void DrawFuseSegment(Vector2 start, Vector2 end, Color color, float thickness)
+        void DrawFuseVertical(float x, float pathY, float length, float segmentStart, float elapsed, bool reverse, float thickness)
         {
-            Vector2 center = (start + end) * 0.5f;
-            float length = Vector2.Distance(start, end);
-            float angle = Mathf.Atan2(end.y - start.y, end.x - start.x) * Mathf.Rad2Deg;
-            Matrix4x4 saved = GUI.matrix;
-            GUIUtility.RotateAroundPivot(angle, center);
-            Fill(new Rect(center.x - length * 0.5f, center.y - thickness * 0.5f, length, thickness), color, white);
-            GUI.matrix = saved;
+            float offset = Mathf.Clamp(elapsed - segmentStart, 0, length);
+            float visibleLength = length - offset;
+            if (visibleLength <= 0) return;
+            float y = reverse ? pathY - offset - visibleLength : pathY + offset;
+            Fill(new Rect(x - thickness * 0.5f, y, thickness, visibleLength), Accent, white);
         }
         static string PlayerAction(SeatView player)
         {
             string status = player.status ?? "";
+            if (status == "Waiting for big blind") return "Wait for BB";
+            if (status == "Post next eligible hand") return "Post next";
+            if (status == "Ready for next hand") return "Next hand";
             if (player.folded || status == "Folded") return "Fold";
             if (status == "All in" || (player.inHand && player.stack == 0)) return "All-in";
             if (player.drawCount > 0) return "Draws " + player.drawCount;
@@ -536,6 +546,27 @@ namespace Drawmaha
             if (status.StartsWith("Raise to ", StringComparison.Ordinal)) return "Raise " + status.Substring(9);
             if (status == "Check" || status.StartsWith("Call ", StringComparison.Ordinal)) return status;
             return "";
+        }
+        static string AvatarInitials(string username)
+        {
+            if (string.IsNullOrWhiteSpace(username)) return "?";
+            string[] parts = username.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length > 1) return (parts[0][0].ToString() + parts[parts.Length - 1][0]).ToUpperInvariant();
+            return parts[0].Substring(0, 1).ToUpperInvariant();
+        }
+        static Color AvatarColor(int avatar)
+        {
+            switch (Mathf.Clamp(avatar, 0, 7))
+            {
+                case 0: return new Color(0.17f, 0.57f, 0.78f);
+                case 1: return new Color(0.87f, 0.31f, 0.26f);
+                case 2: return new Color(0.22f, 0.62f, 0.41f);
+                case 3: return new Color(0.86f, 0.62f, 0.16f);
+                case 4: return new Color(0.54f, 0.39f, 0.76f);
+                case 5: return new Color(0.13f, 0.62f, 0.61f);
+                case 6: return new Color(0.80f, 0.34f, 0.55f);
+                default: return new Color(0.42f, 0.55f, 0.65f);
+            }
         }
         void DrawDealerButton(TableState t, int actual, Rect box)
         {
@@ -577,12 +608,14 @@ namespace Drawmaha
             var value = new Drawmaha.Card(face.rank, face.suit);
             Color suitColor = SuitColor(face.suit);
             Fill(rect, CardFaceColor, rounded);
-            float cornerWidth = 40f * cardScale;
+            float standardCornerWidth = 40f * cardScale;
+            float cornerWidth = (value.RankText == "10" ? 62f : 40f) * cardScale;
             int cornerRankSize = Mathf.RoundToInt(62f * cardScale);
             float cornerRankHeight = rect.height * 0.46f;
             float cornerIndexX = rect.x + 2 * cardScale;
-            float cornerIndexCenter = cornerIndexX + cornerWidth / 2;
-            Label(cornerIndexX, rect.y - 3 * cardScale, cornerWidth, cornerRankHeight, value.RankText,
+            float cornerRankX = cornerIndexX - (cornerWidth - standardCornerWidth) * 0.5f;
+            float cornerIndexCenter = cornerIndexX + standardCornerWidth / 2;
+            Label(cornerRankX, rect.y - 3 * cardScale, cornerWidth, cornerRankHeight, value.RankText,
                 Style(cornerRankSize, suitColor, FontStyle.Normal, TextAnchor.MiddleCenter, cardFont));
             float cornerSuitSize = 38f * cardScale;
             DrawSuit(new Rect(cornerIndexCenter - cornerSuitSize / 2, rect.y + rect.height * 0.40f,
@@ -621,7 +654,7 @@ namespace Drawmaha
             Fill(new Rect(1230, 880, 650, 184), Panel, rounded);
             var own = t.players[t.yourSeat];
             bool animationsDone = Time.unscaledTime >= handStarted + InitialDuration(t) && shownBoard == t.board.Length;
-            bool enabled = network.Connected && !network.CommandPending && !own.leaving && animationsDone;
+            bool enabled = network.Connected && !network.CommandPending && animationsDone;
             if (!own.inHand || t.stage == "Waiting")
             {
                 Label(1254, 894, 580, 29, own.status, small);
@@ -629,7 +662,7 @@ namespace Drawmaha
                 if (Button(new Rect(1537, 966, 318, 52), "Wait for big blind", enabled)) network.Send(new Command { type = "entry", entryMode = "wait" }); return;
             }
             if (t.stage == "Complete") { Label(1254, 925, 580, 40, "Next hand starts automatically when two players are available.", small); return; }
-            if (t.actor != t.yourSeat || own.folded || own.leaving) { Label(1254, 925, 580, 44, own.leaving ? "You will leave after this hand. Your remaining turns fold automatically." : animationsDone ? "Waiting for the other players…" : "Dealing cards…", small); return; }
+            if (t.actor != t.yourSeat || own.folded) { Label(1254, 925, 580, 44, animationsDone ? "Waiting for the other players…" : "Dealing cards…", small); return; }
             if (t.stage == "Draw")
             {
                 int count = selected.Count(s => s); Label(1254, 901, 570, 45, "Select up to two cards above.  " + count + "/2 selected.", small);

@@ -14,11 +14,11 @@ Six human seats per table. No bots. The server shuffles, deals, validates action
 
    A development server permits an empty invite key. To require one, set `DRAWMAHA_ACCESS_KEY` before starting it. Production refuses to start without a key of at least 16 characters.
 3. In Unity, choose **Tools → Drawmaha → Open Table**, then press Play.
-4. On the lobby page, enter `ws://localhost:8080/ws`, a username, and an avatar. Connect and join a table.
+4. On the connect screen, enter a username and invite code. The default server address is `ws://localhost:8080/ws`; after connecting, choose a table in the lobby.
 5. Build a Windows client using **Tools → Drawmaha → Build Windows Client** and run a second instance with a **different username**. Saved reconnect identities are separate for each username/server combination.
 6. With two seated, connected players, the first hand starts automatically. Later hands start six seconds after settlement. New arrivals wait for the next eligible hand.
 
-For a friend on another computer, deploy the server as described in [AZURE_SETUP.md](AZURE_SETUP.md). Remote connections require `wss://`; unencrypted `ws://` is allowed only for loopback testing. An Azure deployment has not been performed for you.
+For a friend on another computer, deploy the server as described in [AZURE_SETUP.md](AZURE_SETUP.md). Configure the generated `wss://` address as the client build's default endpoint before distributing it; players only enter their username and invite code. Remote connections require `wss://`; unencrypted `ws://` is allowed only for loopback testing. An Azure deployment has not been performed for you.
 
 ## Lobby tables
 
