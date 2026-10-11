@@ -56,9 +56,9 @@ A player may pay an **entry** big blind and then a **natural** big blind soon af
 - Circular profile picture/initial, username, chips below the username, action text, dealer marker, and pulsing turn outline with a countdown.
 - Opponent card **identities are absent from network packets** before showdown. Remaining hands reveal at showdown; folded hands and uncontested survivors stay hidden from opponents.
 - Undealt board positions are empty. Private cards and board cards animate from the dealer area one at a time. All-in runouts animate the full board before revealing showdown hands.
-- Background, table and card appearance change independently from **Appearance**. Three theme assets are created on import: Emerald, Midnight and Burgundy.
+- Choose the background and poker table independently from **Settings**. The defaults are `BeachBackground` and `BeachPokerTable`.
 
-Create additional assets via **Assets → Create → Drawmaha → Table Theme**, and save them under `Assets/Resources/TableThemes`. Set colors or assign `BackgroundImage`, `TableImage`, `CardBackImage`, and `CardFaceImage`. A table texture should have a transparent surrounding area; a card-face texture is a background with ranks/suits drawn over it. Fill the theme's `Avatars` array for actual profile photos; avatar indices 0–7 correspond to lobby choices 1–8. Import profile textures with **Read/Write Enabled** so the circular mask can be generated. Without pictures, the client shows colored circles with initials.
+To add options, place background images under `Assets/Resources/Backgrounds` and poker-table images under `Assets/Resources/PokerTables`. The Settings selectors load Texture2D assets from those folders. Background images fill the screen; table images are centered using their source aspect ratio, so transparent margins are useful for oval-table artwork. Avatar indices 0–7 correspond to lobby choices 1–8; without profile pictures, the client shows colored circles with initials.
 
 This uses a scaled IMGUI interface to preserve the original project's dependency-free setup. Desktop landscape is the primary target. Unity Editor rendering, standalone builds, mobile input, and IL2CPP have not been verified here. `ClientWebSocket` does not provide a WebGL/browser transport in this version.
 

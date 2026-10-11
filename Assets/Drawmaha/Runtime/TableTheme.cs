@@ -2,7 +2,6 @@ using UnityEngine;
 
 namespace Drawmaha
 {
-    [CreateAssetMenu(menuName = "Drawmaha/Table Theme")]
     public sealed class TableTheme : ScriptableObject
     {
         public string DisplayName = "Emerald";
