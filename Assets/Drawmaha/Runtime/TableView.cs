@@ -13,13 +13,13 @@ namespace Drawmaha
         MultiplayerClient network;
         TableState previewTable;
         TableState CurrentTable { get { return previewTable ?? network.Table; } }
-        Texture2D[] backgrounds, pokerTables;
-        int backgroundIndex, tableIndex, avatarIndex;
+        Texture2D[] backgrounds, pokerTables, cardBacks;
+        int backgroundIndex, tableIndex, cardBackIndex, cardFaceStyle, avatarIndex;
         const float CardDealSeconds = 0.14f, BoardDealSeconds = 0.38f;
         readonly Color Accent = new Color(0.12f, 0.72f, 0.74f);
         readonly Color CardBackColor = new Color(0.075f, 0.24f, 0.38f);
         readonly Color CardFaceColor = new Color(0.98f, 0.97f, 0.92f);
-        Texture2D white, round, rounded, felt, pokerChip, cardBack, buttonNormal, buttonHover, buttonPressed, accentNormal, accentHover;
+        Texture2D white, round, rounded, felt, pokerChip, cardBack, buttonNormal, buttonHover, buttonPressed, accentNormal, accentHover, betSliderThumb;
         readonly Texture2D[] cardSuits = new Texture2D[4];
         readonly Texture2D[] cardSuitSources = new Texture2D[4];
         Font cardFont;
@@ -27,13 +27,13 @@ namespace Drawmaha
         readonly bool[] selected = new bool[5];
         readonly Vector2[] positions = { new Vector2(960, 790), new Vector2(405, 565), new Vector2(405, 345), new Vector2(960, 195), new Vector2(1515, 345), new Vector2(1515, 565) };
         readonly Vector2[] betPositions = { new Vector2(960, 628), new Vector2(610, 604), new Vector2(610, 410), new Vector2(960, 327), new Vector2(1310, 410), new Vector2(1310, 604) };
-        GUIStyle text, small, bold, title, button, accentButton, input;
+        GUIStyle text, small, bold, title, button, accentButton, input, betAmountStyle, betSliderStyle, betSliderThumbStyle;
         string endpoint = "ws://localhost:8080/ws", username = "", invite = "", error = "", lastTable = "";
         bool post, showMenu, showHistory, showRules, showSettings;
-        Vector2 historyScroll;
-        int lastHand = -1, shownBoard, lastActor = -99;
+        Vector2 historyScroll, customizationScroll;
+        int lastHand = -1, shownBoard, lastActor = -99, customizationTab;
         float handStarted, nextBoardAt, raiseTo, errorUntil, leaveNoticeUntil, turnTimerStartedAt, turnTimerDuration;
-        string leaveNotice = "";
+        string leaveNotice = "", raiseAmountText = "", drawHandLabel = "", omahaHandLabel = "";
         TableState previous;
         Color Ink { get { return new Color(0.91f, 0.94f, 0.96f); } }
         Color Dim { get { return new Color(0.53f, 0.64f, 0.68f); } }
@@ -58,6 +58,7 @@ namespace Drawmaha
             Application.targetFrameRate = 60;
             white = new Texture2D(1, 1); white.SetPixel(0, 0, Color.white); white.Apply();
             round = CircleTexture();
+            betSliderThumb = CircleTexture(Accent);
             pokerChip = Resources.Load<Texture2D>("PokerChipStyles/GreenPokerChip");
             if (pokerChip == null)
             {
@@ -75,6 +76,9 @@ namespace Drawmaha
             LoadCardStyleAssets();
             backgroundIndex = FindImageIndex(backgrounds, "drawmaha.background.asset", "BeachBackground");
             tableIndex = FindImageIndex(pokerTables, "drawmaha.pokertable.asset", "BeachPokerTable");
+            cardBackIndex = FindImageIndex(cardBacks, "drawmaha.cardback.asset", "drawmaha_blue_card_back_720x1008");
+            if (cardBacks.Length > 0) cardBack = cardBacks[cardBackIndex];
+            cardFaceStyle = Mathf.Clamp(PlayerPrefs.GetInt("drawmaha.card.face.style", 0), 0, 2);
             PlayerPrefs.DeleteKey("drawmaha.endpoint"); username = PlayerPrefs.GetString("drawmaha.username", "");
             network = gameObject.AddComponent<MultiplayerClient>();
             network.StateChanged += Received;
@@ -88,6 +92,7 @@ namespace Drawmaha
                 handStarted = Time.unscaledTime - InitialDuration(previewTable);
                 turnTimerStartedAt = Time.unscaledTime;
                 turnTimerDuration = Mathf.Max(0.1f, (previewTable.deadlineUnixMs - previewTable.serverUnixMs) / 1000f);
+                UpdateHandLabels(previewTable);
             }
 #endif
             RebuildFelt();
@@ -104,12 +109,12 @@ namespace Drawmaha
         {
             Destroy(white); Destroy(round); Destroy(rounded); Destroy(felt);
             if (ownsPokerChip) Destroy(pokerChip);
-            Destroy(buttonNormal); Destroy(buttonHover); Destroy(buttonPressed); Destroy(accentNormal); Destroy(accentHover);
+            Destroy(buttonNormal); Destroy(buttonHover); Destroy(buttonPressed); Destroy(accentNormal); Destroy(accentHover); Destroy(betSliderThumb);
             foreach (Texture2D suit in cardSuits) if (suit != null) Destroy(suit);
         }
         void LoadCardStyleAssets()
         {
-            cardBack = Resources.Load<Texture2D>("CardStyles/Backs/drawmaha_blue_card_back_720x1008");
+            cardBacks = Resources.LoadAll<Texture2D>("CardStyles/Backs").OrderBy(image => image.name).ToArray();
             cardFont = Resources.Load<Font>("Fonts/Bignoodletitling-8ojz");
             string[] suitNames = { "Club", "Diamond", "Heart", "Spade" };
             for (int suit = 0; suit < suitNames.Length; suit++)
@@ -118,14 +123,13 @@ namespace Drawmaha
                 if (source == null) continue;
                 cardSuitSources[suit] = source;
                 if (!source.isReadable) continue;
-                Color32 tint = SuitColor(suit);
                 const int outputSize = 384;
                 var tintedPixels = new Color32[outputSize * outputSize];
                 for (int y = 0; y < outputSize; y++) for (int x = 0; x < outputSize; x++)
                 {
                     float u = (x + 0.5f) / outputSize, v = (y + 0.5f) / outputSize;
                     byte alpha = (byte)Mathf.RoundToInt(source.GetPixelBilinear(u, v).a * 255);
-                    tintedPixels[y * outputSize + x] = new Color32(tint.r, tint.g, tint.b, alpha);
+                    tintedPixels[y * outputSize + x] = new Color32(255, 255, 255, alpha);
                 }
                 Texture2D coloredSuit = new Texture2D(outputSize, outputSize, TextureFormat.RGBA32, true);
                 coloredSuit.name = suitNames[suit] + "CardTint";
@@ -139,6 +143,7 @@ namespace Drawmaha
         void Received(TableState state)
         {
             if (state == null) return;
+            UpdateHandLabels(state);
             bool wasLeaving = previous != null && previous.yourSeat >= 0 && previous.players[previous.yourSeat].leaving;
             bool isLeaving = state.yourSeat >= 0 && state.players[state.yourSeat].leaving;
             if (isLeaving && (previous == null || !wasLeaving))
@@ -163,6 +168,23 @@ namespace Drawmaha
             }
             lastActor = state.actor; previous = state;
         }
+        void UpdateHandLabels(TableState state)
+        {
+            if (state.yourSeat < 0 || state.yourSeat >= state.players.Length)
+            {
+                drawHandLabel = omahaHandLabel = ""; return;
+            }
+            CardView[] cards = state.players[state.yourSeat].cards;
+            if (cards == null || cards.Length != 5)
+            {
+                drawHandLabel = omahaHandLabel = ""; return;
+            }
+            var hole = cards.Select(card => new Drawmaha.Card(card.rank, card.suit)).ToArray();
+            drawHandLabel = HandEvaluator.Five(hole).Name;
+            omahaHandLabel = state.board != null && state.board.Length >= 3
+                ? HandEvaluator.Omaha(hole, state.board.Select(card => new Drawmaha.Card(card.rank, card.suit)).ToArray()).Name
+                : "Waiting for flop";
+        }
         float InitialDuration(TableState state) { return state.players.Count(p => p.inHand) * 5 * CardDealSeconds; }
         void Update()
         {
@@ -178,16 +200,11 @@ namespace Drawmaha
             long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             var state = new TableState
             {
-                id = "visual-preview", name = "Visual Preview", stage = "Draw", yourSeat = 0,
+                id = "visual-preview", name = "Visual Preview", stage = "Preflop", yourSeat = 0,
                 hand = 42, dealer = 2, smallBlindSeat = 3, bigBlindSeat = 4, smallBlind = 5,
                 bigBlind = 10, pot = 185, actor = 0, call = 20, minRaise = 30, maxRaise = 400,
-                revision = 1, serverUnixMs = now, deadlineUnixMs = now + 45000, showdown = false,
-                players = new SeatView[6], board = new[]
-                {
-                    new CardView { rank = 6, suit = 0 }, new CardView { rank = 7, suit = 1 },
-                    new CardView { rank = 8, suit = 2 }, new CardView { rank = 9, suit = 3 },
-                    new CardView { rank = 10, suit = 0 }
-                },
+                revision = 1, serverUnixMs = now, deadlineUnixMs = now + 45000, showdown = false, canRaise = true,
+                players = new SeatView[6], board = Array.Empty<CardView>(),
                 results = new[] { "Visual preview hand" },
                 history = new[] { "Hand 42 · Button at seat 3.", "Northstar calls 20.", "Visual preview state." }
             };
@@ -209,12 +226,16 @@ namespace Drawmaha
         static CardView PreviewCard(int index) { return new CardView { rank = 2 + index % 13, suit = index / 13 % 4 }; }
         Texture2D CircleTexture()
         {
+            return CircleTexture(Color.white);
+        }
+        Texture2D CircleTexture(Color tint)
+        {
             const int size = 512; float center = size / 2f;
             var texture = new Texture2D(size, size, TextureFormat.RGBA32, true); var pixels = new Color[size * size];
             for (int y = 0; y < size; y++) for (int x = 0; x < size; x++)
             {
                 float d = Vector2.Distance(new Vector2(x + 0.5f, y + 0.5f), new Vector2(center, center));
-                pixels[y * size + x] = new Color(1, 1, 1, Mathf.Clamp01(center + 0.5f - d));
+                Color pixel = tint; pixel.a *= Mathf.Clamp01(center + 0.5f - d); pixels[y * size + x] = pixel;
             }
             texture.SetPixels(pixels); texture.Apply(); texture.filterMode = FilterMode.Trilinear; texture.wrapMode = TextureWrapMode.Clamp; return texture;
         }
@@ -293,6 +314,16 @@ namespace Drawmaha
             button.padding = new RectOffset(12, 12, 8, 8);
             accentButton = new GUIStyle(button); accentButton.normal.background = accentNormal; accentButton.hover.background = accentHover;
             input = new GUIStyle(GUI.skin.textField); input.fontSize = 19; input.padding = new RectOffset(12, 12, 10, 8);
+            betAmountStyle = new GUIStyle(input); betAmountStyle.fontSize = 27; betAmountStyle.alignment = TextAnchor.MiddleCenter;
+            betSliderStyle = new GUIStyle(GUI.skin.horizontalSlider);
+            betSliderThumbStyle = new GUIStyle(GUI.skin.horizontalSliderThumb)
+            {
+                fixedWidth = 22, fixedHeight = 22, margin = new RectOffset(0, 0, 0, 0), padding = new RectOffset(0, 0, 0, 0),
+                border = new RectOffset(0, 0, 0, 0)
+            };
+            betSliderThumbStyle.normal.background = betSliderThumb;
+            betSliderThumbStyle.hover.background = betSliderThumb;
+            betSliderThumbStyle.active.background = betSliderThumb;
         }
         void Fill(Rect rect, Color color, Texture2D texture = null)
         {
@@ -338,7 +369,7 @@ namespace Drawmaha
         void Menu(TableState currentTable)
         {
             Fill(new Rect(24, 90, 270, 250), Panel, rounded);
-            if (Button(new Rect(38, 102, 242, 48), "Settings")) { showSettings = true; showMenu = false; }
+            if (Button(new Rect(38, 102, 242, 48), "Customization")) { showSettings = true; showMenu = false; }
             if (Button(new Rect(38, 158, 242, 48), "Rules")) { showRules = true; showMenu = false; }
             if (Button(new Rect(38, 214, 242, 48), "History", currentTable != null)) { showHistory = true; showMenu = false; }
             bool canLeaveTable = network.Connected && currentTable != null && currentTable.yourSeat >= 0
@@ -410,7 +441,7 @@ namespace Drawmaha
             if (t.stage == "Waiting")
             {
                 for (int i = 0; i < 6; i++) Seat(t, i);
-                Label(560, 495, 800, 70, "Waiting for players", Style(30, Ink, FontStyle.Bold, TextAnchor.MiddleCenter));
+                Label(560, 495, 800, 70, "Waiting for players", Style(30, Color.black, FontStyle.Bold, TextAnchor.MiddleCenter));
                 Controls(t);
                 return;
             }
@@ -424,8 +455,7 @@ namespace Drawmaha
             }
             for (int i = 0; i < 6; i++) Seat(t, i);
             if (t.stage == "Complete" && shownBoard == t.board.Length)
-                Label(650, 568, 620, 86, string.Join("\n", t.results.Take(3).ToArray()), Style(17, Ink, FontStyle.Normal, TextAnchor.MiddleCenter));
-            else if (t.actor >= 0) Label(650, 568, 620, 32, t.actor == t.yourSeat ? (t.stage == "Draw" ? "YOUR DRAW · SELECT DISCARDS" : "YOUR TURN") : t.players[t.actor].username + "'s turn", Style(18, t.actor == t.yourSeat && t.stage == "Draw" ? Color.black : Ink, FontStyle.Bold, TextAnchor.MiddleCenter));
+                Label(650, 568, 620, 86, string.Join("\n", t.results.Take(3).ToArray()), Style(17, Color.black, FontStyle.Normal, TextAnchor.MiddleCenter));
             Controls(t);
         }
         void Seat(TableState t, int actual)
@@ -463,6 +493,21 @@ namespace Drawmaha
             DrawSeatPanel(p, box, acting);
             DrawDealerButton(t, actual, box);
             DrawBetChip(p, relative);
+            if (own && !string.IsNullOrEmpty(drawHandLabel))
+            {
+                string omahaText = "Omaha hand: " + omahaHandLabel;
+                string drawText = "Draw hand: " + drawHandLabel;
+                GUIStyle handStyle = Style(15, Color.white, FontStyle.Bold, TextAnchor.MiddleCenter);
+                float badgeWidth = Mathf.Max(handStyle.CalcSize(new GUIContent(omahaText)).x,
+                    handStyle.CalcSize(new GUIContent(drawText)).x) + 24;
+                Rect badge = new Rect(box.center.x - badgeWidth / 2, 877, badgeWidth, 42);
+                Color badgeColor = new Color(0.23f, 0.25f, 0.27f, 0.96f);
+                Fill(new Rect(badge.x + badge.height / 2, badge.y, badge.width - badge.height, badge.height), badgeColor);
+                Fill(new Rect(badge.x, badge.y, badge.height, badge.height), badgeColor, round);
+                Fill(new Rect(badge.xMax - badge.height, badge.y, badge.height, badge.height), badgeColor, round);
+                Label(badge.x + 8, badge.y + 1, badge.width - 16, 20, omahaText, handStyle);
+                Label(badge.x + 8, badge.y + 21, badge.width - 16, 20, drawText, handStyle);
+            }
             if (own && t.actor == actual && t.stage == "Draw" && (previewTable != null || network.Connected) && !network.CommandPending && GUI.enabled && Time.unscaledTime >= handStarted + InitialDuration(t))
             {
                 // Reverse hit order matches the visual stacking of overlapping cards.
@@ -489,9 +534,9 @@ namespace Drawmaha
             Fill(avatarBox, AvatarColor(p.avatar), round);
             Label(avatarBox.x, avatarBox.y, avatarBox.width, avatarBox.height, AvatarInitials(p.username),
                 Style(17, Color.white, FontStyle.Bold, TextAnchor.MiddleCenter));
-            Label(box.x + 60, box.y + 6, box.width - 68, 23, p.username,
+            Label(box.x, box.y + 6, box.width, 23, p.username,
                 Style(15, Ink, FontStyle.Bold, TextAnchor.MiddleCenter));
-            Label(box.x + 60, box.y + 33, box.width - 68, 23, p.stack.ToString("N0") + " Chips",
+            Label(box.x, box.y + 33, box.width, 23, p.stack.ToString("N0") + " Chips",
                 Style(17, Accent, FontStyle.Normal, TextAnchor.MiddleCenter));
             Label(actionBox.x + 4, actionBox.y, actionBox.width - 8, actionBox.height, PlayerAction(p),
                 Style(13, Accent, FontStyle.Bold, TextAnchor.MiddleCenter));
@@ -591,9 +636,9 @@ namespace Drawmaha
         {
             float cardScale = rect.width / 90f;
             Fill(new Rect(rect.x + 2 * cardScale, rect.y + 5 * cardScale, rect.width, rect.height), new Color(0, 0, 0, 0.28f), rounded);
-            Fill(new Rect(rect.x - 1.5f * cardScale, rect.y - 1.5f * cardScale, rect.width + 3 * cardScale, rect.height + 3 * cardScale), marked ? Accent : new Color(0.82f, 0.84f, 0.83f), rounded);
             if (face == null)
             {
+                Fill(new Rect(rect.x - 1.5f * cardScale, rect.y - 1.5f * cardScale, rect.width + 3 * cardScale, rect.height + 3 * cardScale), new Color(0.82f, 0.84f, 0.83f), rounded);
                 Fill(rect, CardBackColor, rounded);
                 if (cardBack != null) GUI.DrawTexture(rect, cardBack, ScaleMode.StretchToFill, true);
                 else
@@ -605,9 +650,17 @@ namespace Drawmaha
                 }
                 return;
             }
+            DrawCardFace(rect, face, marked, cardFaceStyle);
+        }
+        void DrawCardFace(Rect rect, CardView face, bool marked, int styleIndex)
+        {
+            float cardScale = rect.width / 90f;
             var value = new Drawmaha.Card(face.rank, face.suit);
-            Color suitColor = SuitColor(face.suit);
-            Fill(rect, CardFaceColor, rounded);
+            Color suitColor = SuitColor(face.suit, styleIndex);
+            bool coloredFace = styleIndex == 2;
+            Color edgeColor = marked ? Accent : coloredFace ? suitColor : new Color(0.82f, 0.84f, 0.83f);
+            Fill(new Rect(rect.x - 1.5f * cardScale, rect.y - 1.5f * cardScale, rect.width + 3 * cardScale, rect.height + 3 * cardScale), edgeColor, rounded);
+            Fill(rect, coloredFace ? suitColor : CardFaceColor, rounded);
             float standardCornerWidth = 40f * cardScale;
             float cornerWidth = (value.RankText == "10" ? 62f : 40f) * cardScale;
             int cornerRankSize = Mathf.RoundToInt(62f * cardScale);
@@ -616,15 +669,15 @@ namespace Drawmaha
             float cornerRankX = cornerIndexX - (cornerWidth - standardCornerWidth) * 0.5f;
             float cornerIndexCenter = cornerIndexX + standardCornerWidth / 2;
             Label(cornerRankX, rect.y - 3 * cardScale, cornerWidth, cornerRankHeight, value.RankText,
-                Style(cornerRankSize, suitColor, FontStyle.Normal, TextAnchor.MiddleCenter, cardFont));
+                Style(cornerRankSize, coloredFace ? Color.white : suitColor, FontStyle.Normal, TextAnchor.MiddleCenter, cardFont));
             float cornerSuitSize = 38f * cardScale;
             DrawSuit(new Rect(cornerIndexCenter - cornerSuitSize / 2, rect.y + rect.height * 0.40f,
                 cornerSuitSize, cornerSuitSize),
-                face.suit);
+                face.suit, coloredFace ? Color.white : suitColor);
             float centerSuitSize = 70f * cardScale;
             Rect largeSuit = new Rect(rect.xMax - centerSuitSize + 6 * cardScale,
                 rect.yMax - centerSuitSize + 5 * cardScale, centerSuitSize, centerSuitSize);
-            DrawSuit(largeSuit, face.suit);
+            DrawSuit(largeSuit, face.suit, coloredFace ? Color.white : suitColor);
             if (marked)
             {
                 float bannerHeight = 19 * cardScale;
@@ -633,8 +686,18 @@ namespace Drawmaha
                     Style(Mathf.RoundToInt(11 * cardScale), Panel, FontStyle.Bold, TextAnchor.MiddleCenter));
             }
         }
-        static Color SuitColor(int suit)
+        static Color SuitColor(int suit, int styleIndex)
         {
+            if (styleIndex == 1 || styleIndex == 2)
+            {
+                switch (suit)
+                {
+                    case 0: return new Color(0.10f, 0.56f, 0.26f);
+                    case 1: return new Color(0.12f, 0.39f, 0.86f);
+                    case 2: return new Color(0.84f, 0.12f, 0.16f);
+                    default: return new Color(0.08f, 0.09f, 0.11f);
+                }
+            }
             switch (suit)
             {
                 case 1:
@@ -642,12 +705,12 @@ namespace Drawmaha
                 default: return new Color(0.08f, 0.09f, 0.11f);
             }
         }
-        void DrawSuit(Rect rect, int suit)
+        void DrawSuit(Rect rect, int suit, Color tint)
         {
             if (suit >= 0 && suit < cardSuits.Length && cardSuits[suit] != null)
-                Fill(rect, Color.white, cardSuits[suit]);
+                Fill(rect, tint, cardSuits[suit]);
             else if (suit >= 0 && suit < cardSuitSources.Length && cardSuitSources[suit] != null)
-                Fill(rect, Color.white, cardSuitSources[suit]);
+                Fill(rect, tint, cardSuitSources[suit]);
         }
         void Controls(TableState t)
         {
@@ -669,23 +732,87 @@ namespace Drawmaha
                 if (Button(new Rect(1250, 966, 605, 52), count == 0 ? "Stand pat" : "Draw " + count + " cards", enabled, true))
                 { network.Send(new Command { type = "draw", discards = Enumerable.Range(0, 5).Where(i => selected[i]).ToArray() }); Array.Clear(selected, 0, 5); } return;
             }
+            bool callAllIn = t.call > 0 && t.call >= own.stack;
+            if (callAllIn)
+            {
+                Label(1254, 900, 580, 48, "Calling commits your remaining stack.", small);
+                if (Button(new Rect(1250, 966, 294, 56), "Fold", enabled)) network.Send(new Command { type = "fold" });
+                if (Button(new Rect(1560, 966, 295, 56), "All-in", enabled, true)) network.Send(new Command { type = "call" });
+                return;
+            }
             int min = Math.Min(t.minRaise, t.maxRaise), max = t.maxRaise;
             if (t.canRaise)
             {
                 raiseTo = Mathf.Clamp(raiseTo, min, max);
-                Label(1254, 887, 580, 27, "RAISE TO  " + Mathf.RoundToInt(raiseTo).ToString("N0"), Style(15, Dim, FontStyle.Bold));
-                if (Button(new Rect(1250, 918, 190, 36), "Minimum", enabled)) raiseTo = min;
-                if (Button(new Rect(1450, 918, 190, 36), "Middle", enabled)) raiseTo = Mathf.RoundToInt(Mathf.Lerp(min, max, 0.5f));
-                if (Button(new Rect(1650, 918, 205, 36), "Pot", enabled)) raiseTo = max;
-                raiseTo = Mathf.Clamp(GUI.HorizontalSlider(new Rect(1264, 959, 578, 20), raiseTo, min, Math.Max(min + 1, max)), min, max);
+                int presetWidth = 145;
+                if (Button(new Rect(1250, 886, presetWidth, 40), "2x", enabled)) raiseTo = RaisePreset(own, t, 2, min, max);
+                if (Button(new Rect(1403, 886, presetWidth, 40), "3x", enabled)) raiseTo = RaisePreset(own, t, 3, min, max);
+                if (Button(new Rect(1556, 886, presetWidth, 40), "4x", enabled)) raiseTo = RaisePreset(own, t, 4, min, max);
+                if (Button(new Rect(1709, 886, 146, 40), "POT", enabled)) raiseTo = max;
+                int step = Math.Max(1, (max - min) / 20);
+                if (Button(new Rect(1250, 934, 40, 42), "-", enabled)) raiseTo = Mathf.Max(min, raiseTo - step);
+                Rect sliderRect = new Rect(1290, 947, 314, 16);
+                raiseTo = Mathf.Clamp(GUI.HorizontalSlider(sliderRect, raiseTo, min, Math.Max(min + 1, max), betSliderStyle, betSliderThumbStyle), min, max);
+                if (Button(new Rect(1604, 934, 40, 42), "+", enabled)) raiseTo = Mathf.Min(max, raiseTo + step);
+                DrawRaiseAmount(new Rect(1653, 930, 202, 50), min, max);
             }
-            if (Button(new Rect(1250, 990, 164, 54), "Fold", enabled)) network.Send(new Command { type = "fold" });
-            if (Button(new Rect(1424, 990, 194, 54), t.call == 0 ? "Check" : "Call " + t.call.ToString("N0"), enabled, true)) network.Send(new Command { type = "call" });
-            if (Button(new Rect(1628, 990, 227, 54), "Raise", enabled && t.canRaise, true)) network.Send(new Command { type = "raise", raiseTo = Mathf.RoundToInt(raiseTo) });
+            if (t.canRaise)
+            {
+                bool raiseAllIn = Mathf.RoundToInt(raiseTo) == own.bet + own.stack;
+                bool isBet = t.stage != "Preflop" && t.call == 0;
+                string raiseLabel = raiseAllIn ? "All-in" : (isBet ? "Bet " : "Raise ") + Mathf.RoundToInt(raiseTo).ToString("N0");
+                if (Button(new Rect(1250, 990, 194, 56), "Fold", enabled)) network.Send(new Command { type = "fold" });
+                if (Button(new Rect(1455, 990, 194, 56), t.call == 0 ? "Check" : "Call " + t.call.ToString("N0"), enabled, true)) network.Send(new Command { type = "call" });
+                if (Button(new Rect(1660, 990, 195, 56), raiseLabel, enabled, true)) network.Send(new Command { type = "raise", raiseTo = Mathf.RoundToInt(raiseTo) });
+            }
+            else
+            {
+                if (Button(new Rect(1250, 990, 294, 56), "Fold", enabled)) network.Send(new Command { type = "fold" });
+                if (Button(new Rect(1560, 990, 295, 56), t.call == 0 ? "Check" : "Call " + t.call.ToString("N0"), enabled, true)) network.Send(new Command { type = "call" });
+            }
+        }
+        static int RaisePreset(SeatView player, TableState table, int multiple, int min, int max)
+        {
+            int reference = Math.Max(table.bigBlind, player.bet + table.call);
+            return Mathf.Clamp(reference * multiple, min, max);
+        }
+        void DrawRaiseAmount(Rect rect, int min, int max)
+        {
+            const string controlName = "DrawmahaRaiseAmount";
+            bool focusedBefore = GUI.GetNameOfFocusedControl() == controlName;
+            if (!focusedBefore) raiseAmountText = Mathf.RoundToInt(raiseTo).ToString();
+            bool clickAway = focusedBefore && Event.current.type == EventType.MouseDown && !rect.Contains(Event.current.mousePosition);
+            Fill(rect, new Color(0.025f, 0.045f, 0.065f), rounded);
+            GUI.SetNextControlName(controlName);
+            raiseAmountText = GUI.TextField(rect, raiseAmountText, 16, betAmountStyle);
+            bool focusedAfter = GUI.GetNameOfFocusedControl() == controlName;
+            bool enter = focusedAfter && Event.current.type == EventType.KeyDown
+                && (Event.current.keyCode == KeyCode.Return || Event.current.keyCode == KeyCode.KeypadEnter);
+            if (!clickAway && !enter && !(focusedBefore && !focusedAfter)) return;
+
+            string enteredText = raiseAmountText.Trim();
+            long entered;
+            if (long.TryParse(enteredText, out entered))
+                raiseTo = entered < min ? min : entered > max ? max : (int)entered;
+            else if (IsIntegerText(enteredText))
+                raiseTo = enteredText.StartsWith("-", StringComparison.Ordinal) ? min : max;
+            else
+                raiseTo = Mathf.Clamp(raiseTo, min, max);
+
+            raiseAmountText = Mathf.RoundToInt(raiseTo).ToString();
+            GUI.FocusControl(null);
+            if (enter) Event.current.Use();
+        }
+        static bool IsIntegerText(string value)
+        {
+            if (string.IsNullOrEmpty(value)) return false;
+            int start = value[0] == '-' || value[0] == '+' ? 1 : 0;
+            return start < value.Length && value.Skip(start).All(char.IsDigit);
         }
         void Overlay(string heading)
         {
-            Fill(new Rect(0, 0, W, H), new Color(0, 0, 0, 0.85f)); Fill(new Rect(350, 160, 900, 680), Panel); Label(394, 193, 805, 55, heading, title);
+            Fill(new Rect(330, 140, 940, 720), new Color(0.20f, 0.21f, 0.22f, 0.72f));
+            Fill(new Rect(350, 160, 900, 680), Panel); Label(394, 193, 805, 55, heading, title);
         }
         void Rules()
         {
@@ -713,37 +840,77 @@ namespace Drawmaha
             GUI.EndScrollView(); if (Button(new Rect(964, 773, 241, 44), "Back to game", true, true)) showHistory = false;
             GUI.matrix = oldMatrix;
         }
-        void ImageChoice(float y, string label, Texture2D[] options, ref int index, bool crop)
-        {
-            Fill(new Rect(380, y, 840, 190), new Color(0.075f, 0.105f, 0.12f), rounded);
-            Label(405, y + 12, 350, 30, label.ToUpperInvariant(), bold);
-            Fill(new Rect(405, y + 51, 270, 120), new Color(0.025f, 0.035f, 0.045f), rounded);
-            if (options.Length == 0)
-            {
-                Label(690, y + 80, 480, 38, "Add images to the matching Resources folder.", small);
-                return;
-            }
-            index = Mathf.Clamp(index, 0, options.Length - 1);
-            GUI.DrawTexture(new Rect(410, y + 56, 260, 110), options[index], crop ? ScaleMode.ScaleAndCrop : ScaleMode.ScaleToFit, true);
-            if (Button(new Rect(700, y + 72, 50, 50), "<", options.Length > 1)) index = (index - 1 + options.Length) % options.Length;
-            Label(765, y + 78, 375, 40, options[index].name, bold);
-            Label(765, y + 119, 375, 32, (index + 1) + " of " + options.Length, small);
-            if (Button(new Rect(1150, y + 72, 50, 50), ">", options.Length > 1)) index = (index + 1) % options.Length;
-        }
         void Settings()
         {
             Matrix4x4 oldMatrix = GUI.matrix;
             GUI.matrix = oldMatrix * Matrix4x4.Translate(new Vector3(160, 40, 0));
-            Overlay("SETTINGS");
-            ImageChoice(278, "Background", backgrounds, ref backgroundIndex, true);
-            ImageChoice(488, "Poker table", pokerTables, ref tableIndex, false);
-            if (Button(new Rect(964, 773, 241, 44), "Save settings", true, true))
+            Overlay("CUSTOMIZATION");
+            string[] tabs = { "Card Face", "Card Back", "Table", "Background" };
+            const float tabWidth = 194, tabGap = 8;
+            for (int i = 0; i < tabs.Length; i++)
             {
-                if (backgrounds.Length > 0) PlayerPrefs.SetString("drawmaha.background.asset", backgrounds[backgroundIndex].name);
-                if (pokerTables.Length > 0) PlayerPrefs.SetString("drawmaha.pokertable.asset", pokerTables[tableIndex].name);
-                PlayerPrefs.Save(); showSettings = false;
+                Rect tab = new Rect(394 + i * (tabWidth + tabGap), 258, tabWidth, 48);
+                if (Button(tab, tabs[i], true, customizationTab == i))
+                { customizationTab = i; customizationScroll = Vector2.zero; }
             }
+            DrawCustomizationGrid();
+            if (Button(new Rect(964, 773, 241, 44), "Back to game", true, true)) showSettings = false;
             GUI.matrix = oldMatrix;
+        }
+        void DrawCustomizationGrid()
+        {
+            Texture2D[] options = customizationTab == 1 ? cardBacks : customizationTab == 2 ? pokerTables : backgrounds;
+            int count = customizationTab == 0 ? 3 : options.Length;
+            const float tileWidth = 250, tileHeight = 190, gapX = 14, gapY = 14;
+            int rows = Mathf.Max(1, Mathf.CeilToInt(count / 3f));
+            float contentHeight = rows * (tileHeight + gapY) + 10;
+            customizationScroll = GUI.BeginScrollView(new Rect(394, 318, 812, 430), customizationScroll,
+                new Rect(0, 0, 812, contentHeight));
+            if (count == 0) Label(20, 24, 760, 40, "No previews are available in this category.", small);
+            for (int i = 0; i < count; i++)
+            {
+                int column = i % 3, row = i / 3;
+                Rect tile = new Rect(10 + column * (tileWidth + gapX), 10 + row * (tileHeight + gapY), tileWidth, tileHeight);
+                bool isSelected = customizationTab == 0 ? cardFaceStyle == i
+                    : customizationTab == 1 ? cardBackIndex == i
+                    : customizationTab == 2 ? tableIndex == i : backgroundIndex == i;
+                Fill(tile, isSelected ? Accent : new Color(0.075f, 0.105f, 0.12f), rounded);
+                Rect preview = new Rect(tile.x + 5, tile.y + 5, tile.width - 10, 148);
+                Fill(preview, new Color(0.025f, 0.035f, 0.045f), rounded);
+                string label;
+                if (customizationTab == 0)
+                {
+                    string[] faceNames = { "Classic", "Four-color suits", "Four-color faces" };
+                    const float cardWidth = 66, cardHeight = 92, cardStep = 44;
+                    float firstCardX = tile.center.x - (cardWidth + cardStep * 3) / 2;
+                    for (int suit = 0; suit < 4; suit++)
+                        DrawCardFace(new Rect(firstCardX + suit * cardStep, tile.y + 28, cardWidth, cardHeight),
+                            new CardView { rank = 14, suit = suit }, false, i);
+                    label = faceNames[i];
+                }
+                else
+                {
+                    Texture2D previewImage = options[i];
+                    ScaleMode scaleMode = customizationTab == 3 ? ScaleMode.ScaleAndCrop : ScaleMode.ScaleToFit;
+                    GUI.DrawTexture(preview, previewImage, scaleMode, true);
+                    label = previewImage.name;
+                }
+                Label(tile.x + 6, tile.y + 157, tile.width - 12, 26, label,
+                    Style(16, Color.white, FontStyle.Bold, TextAnchor.MiddleCenter));
+                if (GUI.Button(tile, GUIContent.none, GUIStyle.none))
+                {
+                    if (customizationTab == 0)
+                    { cardFaceStyle = i; PlayerPrefs.SetInt("drawmaha.card.face.style", i); }
+                    else if (customizationTab == 1)
+                    { cardBackIndex = i; cardBack = options[i]; PlayerPrefs.SetString("drawmaha.cardback.asset", cardBack.name); }
+                    else if (customizationTab == 2)
+                    { tableIndex = i; PlayerPrefs.SetString("drawmaha.pokertable.asset", options[i].name); }
+                    else
+                    { backgroundIndex = i; PlayerPrefs.SetString("drawmaha.background.asset", options[i].name); }
+                    PlayerPrefs.Save();
+                }
+            }
+            GUI.EndScrollView();
         }
     }
 }
