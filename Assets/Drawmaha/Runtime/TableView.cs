@@ -28,7 +28,7 @@ namespace Drawmaha
         readonly Vector2[] positions = { new Vector2(960, 790), new Vector2(405, 565), new Vector2(405, 345), new Vector2(960, 195), new Vector2(1515, 345), new Vector2(1515, 565) };
         readonly Vector2[] betPositions = { new Vector2(960, 628), new Vector2(610, 604), new Vector2(610, 410), new Vector2(960, 327), new Vector2(1310, 410), new Vector2(1310, 604) };
         GUIStyle text, small, bold, title, button, accentButton, input, betAmountStyle, betSliderStyle, betSliderThumbStyle;
-        string endpoint = "ws://localhost:8080/ws", username = "", invite = "", error = "", lastTable = "";
+        string endpoint = "wss://drawmaha.blackmushroom-85b81292.centralus.azurecontainerapps.io/ws", username = "", invite = "", error = "", lastTable = "";
         bool post, showMenu, showHistory, showRules, showSettings;
         Vector2 historyScroll, customizationScroll;
         int lastHand = -1, shownBoard, lastActor = -99, customizationTab;

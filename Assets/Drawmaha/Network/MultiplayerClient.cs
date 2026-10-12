@@ -11,7 +11,7 @@ namespace Drawmaha.Network
     // Desktop/Android/iOS .NET transport. Unity APIs and JSON parsing stay on the main thread.
     public sealed class MultiplayerClient : MonoBehaviour
     {
-        public string Endpoint = "ws://localhost:8080/ws";
+        public string Endpoint = "wss://drawmaha.blackmushroom-85b81292.centralus.azurecontainerapps.io/ws";
         public bool Connected { get; private set; }
         public string Status { get; private set; } = "Not connected";
         public TableState Table { get; private set; }

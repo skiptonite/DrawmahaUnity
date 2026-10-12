@@ -14,11 +14,11 @@ Six human seats per table. No bots. The server shuffles, deals, validates action
 
    A development server permits an empty invite key. To require one, set `DRAWMAHA_ACCESS_KEY` before starting it. Production refuses to start without a key of at least 16 characters.
 3. In Unity, choose **Tools → Drawmaha → Open Table**, then press Play.
-4. On the connect screen, enter a username and invite code. The default server address is `ws://localhost:8080/ws`; after connecting, choose a table in the lobby.
+4. On the connect screen, enter a username and invite code. The default server address is the deployed Azure server; after connecting, choose a table in the lobby. To test a local server, change the address to `ws://localhost:8080/ws`.
 5. Build a Windows client using **Tools → Drawmaha → Build Windows Client** and run a second instance with a **different username**. Saved reconnect identities are separate for each username/server combination.
 6. With two seated, connected players, the first hand starts automatically. Later hands start six seconds after settlement. New arrivals wait for the next eligible hand.
 
-For a friend on another computer, deploy the server as described in [AZURE_SETUP.md](AZURE_SETUP.md). Configure the generated `wss://` address as the client build's default endpoint before distributing it; players only enter their username and invite code. Remote connections require `wss://`; unencrypted `ws://` is allowed only for loopback testing. An Azure deployment has not been performed for you.
+For a friend on another computer, build the matching client with **Tools → Drawmaha → Build Windows Client** or **Tools → Drawmaha → Build macOS Client**. For macOS, install **macOS Build Support** for this Unity Editor in Unity Hub first. The macOS build outputs `Builds/macOS/Drawmaha.app` and creates a ready-to-upload `Builds/Drawmaha-macOS.zip` with executable permissions preserved. Attach that ZIP to a GitHub Release. On first launch, macOS may warn that the app is from an unidentified developer; for a private test, Control-click the app, choose **Open**, then confirm. Your friend enters their own username and the invite code you share privately. The client defaults to the deployed Azure server. Remote connections require `wss://`; unencrypted `ws://` is allowed only for loopback testing. See [AZURE_SETUP.md](AZURE_SETUP.md) for server deployment and updates.
 
 ## Lobby tables
 
