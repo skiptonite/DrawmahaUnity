@@ -17,6 +17,7 @@ public sealed class Session
     public Room Room;
     public DateTime LastSeen;
     public bool Leaving, MissedSmall, MissedBig;
+    public bool LeaveRequested;
     public EntryMode Entry;
     public readonly Queue<string> Commands = new();
     public readonly HashSet<string> Seen = new();
@@ -26,6 +27,7 @@ public sealed class Room
     public readonly string Id, Name;
     public readonly Game Game;
     public readonly Session[] Seats = new Session[6];
+    public readonly bool[] ReservedSeats = new bool[6];
     public readonly BlindOrbit Orbit = new();
     public long Revision;
     public DateTime Deadline, NextHand;
@@ -35,7 +37,7 @@ public sealed class Room
     {
         Id = id; Name = name; Game = new Game(new CryptoRandom(), 0, 6) { SmallBlind = small, BigBlind = big };
     }
-    public LobbyRow Lobby() => new() { id = Id, name = Name, smallBlind = Game.SmallBlind, bigBlind = Game.BigBlind, buyIn = BuyIn, occupied = Seats.Count(s => s != null), available = Seats.Count(s => s == null), maxSeats = 6 };
+    public LobbyRow Lobby() => new() { id = Id, name = Name, smallBlind = Game.SmallBlind, bigBlind = Game.BigBlind, buyIn = BuyIn, occupied = Seats.Count(s => s != null) + ReservedSeats.Count(reserved => reserved), available = Enumerable.Range(0, Seats.Length).Count(i => Seats[i] == null && !ReservedSeats[i]), maxSeats = 6 };
     public TableState View(Session viewer, DateTime now)
     {
         int own = viewer?.Seat ?? -1;
@@ -61,8 +63,8 @@ public sealed class Room
                     cards = reveal ? p.Cards.Select(ToCard).ToArray() : Array.Empty<CardView>(),
                     connected = s?.Peer != null, inHand = s != null && p.InHand, folded = p.Folded, drawCount = p.DrawCount,
                     winner = Game.Stage == Street.Complete && p.Payout > 0, scoop = Game.Stage == Street.Complete && p.Scoop,
-                    entryMode = s?.Entry.ToString() ?? "", leaving = s?.Leaving ?? false,
-                    status = s == null ? "Available" : s.Leaving ? "Leaving after hand" : s.Peer == null ? "Disconnected" : !p.InHand ? (s.Entry == EntryMode.PostBigBlind ? "Post next eligible hand" : s.Entry == EntryMode.WaitForBigBlind ? "Waiting for big blind" : "Ready for next hand") : p.Folded ? "Folded" : p.Stack == 0 ? "All in" : p.Action
+                    entryMode = s?.Entry.ToString() ?? "", leaving = i == own && s?.Leaving == true,
+                    status = s == null ? "Available" : s.Peer == null ? "Disconnected" : !p.InHand ? (s.Entry == EntryMode.PostBigBlind ? "Post next eligible hand" : s.Entry == EntryMode.WaitForBigBlind ? "Waiting for big blind" : "Ready for next hand") : p.Folded ? "Folded" : p.Stack == 0 ? "All in" : p.Action
                 };
             }).ToArray()
         };
@@ -142,9 +144,9 @@ public sealed class Hub
                     if (command.type == "leave")
                     {
                         Player player = room.Game.Players[s.Seat];
-                        if (room.Game.Stage != Street.Complete && player.InHand && !player.Folded) throw new InvalidOperationException("Fold before leaving the hand.");
-                        s.Leaving = true;
-                        if (room.Game.Stage == Street.Waiting || room.Game.Stage == Street.Complete) Remove(s);
+                        bool handInProgress = room.Game.Stage != Street.Waiting && room.Game.Stage != Street.Complete;
+                        if (handInProgress && player.InHand && !player.Folded) { s.Leaving = true; s.LeaveRequested = true; }
+                        else Remove(s, handInProgress);
                         Changed(room, now); LobbyChanged();
                     }
                     else if (command.type == "entry")
@@ -154,7 +156,7 @@ public sealed class Hub
                     }
                     else
                     {
-                        if (s.Leaving) throw new InvalidOperationException("You are leaving after this hand.");
+                        if (s.Leaving && !s.LeaveRequested) throw new InvalidOperationException("You are leaving after this hand.");
                         if (command.revision != room.Revision || command.hand != room.Game.HandNumber) throw new InvalidOperationException("Table changed; review the latest state and try again.");
                         if (room.Game.Actor != s.Seat) throw new InvalidOperationException("Not your turn.");
                         switch (command.type)
@@ -165,7 +167,10 @@ public sealed class Hub
                             case "draw": room.Game.Draw(s.Seat, command.discards ?? Array.Empty<int>()); break;
                             default: throw new ArgumentException("Unknown command.");
                         }
-                        AfterAction(room, now); Changed(room, now);
+                        AfterAction(room, now);
+                        bool removed = false;
+                        if (s.LeaveRequested && command.type == "fold") { Remove(s, room.Game.Stage != Street.Complete); removed = true; }
+                        Changed(room, now); if (removed) LobbyChanged();
                     }
                 }
                 s.Seen.Add(command.id); s.Commands.Enqueue(command.id);
@@ -185,18 +190,20 @@ public sealed class Hub
         if (s.Room != null) throw new InvalidOperationException("Leave your current table first.");
         var entry = ParseEntry(command.entryMode);
         var room = Rooms.FirstOrDefault(r => r.Id == command.tableId) ?? throw new ArgumentException("Unknown table.");
-        int seat = Array.FindIndex(room.Seats, p => p == null);
+        int seat = -1;
+        for (int i = 0; i < room.Seats.Length; i++) if (room.Seats[i] == null && !room.ReservedSeats[i]) { seat = i; break; }
         if (seat < 0) throw new InvalidOperationException("Table is full.");
-        s.Room = room; s.Seat = seat; s.Entry = entry; s.Leaving = false; s.MissedBig = s.MissedSmall = false;
-        room.Seats[seat] = s; var p = room.Game.Players[seat]; p.Name = s.Name; p.Stack = room.BuyIn; p.InHand = false; p.Cards.Clear();
+        s.Room = room; s.Seat = seat; s.Entry = entry; s.Leaving = s.LeaveRequested = false; s.MissedBig = s.MissedSmall = false;
+        room.Seats[seat] = s; var p = room.Game.Players[seat]; p.Name = s.Name; p.Stack = room.BuyIn; p.Bet = p.Contributed = p.DrawCount = p.Payout = 0; p.Folded = p.InHand = p.Scoop = false; p.Action = ""; p.Cards.Clear();
         room.Game.Note(s.Name + " joins seat " + (seat + 1) + (entry == EntryMode.PostBigBlind ? " · post big blind" : " · wait for big blind"));
         Changed(room, now); LobbyChanged();
     }
-    void Remove(Session s)
+    void Remove(Session s, bool reserveSeat = false)
     {
         Room room = s.Room; if (room == null) return;
+        room.ReservedSeats[s.Seat] = reserveSeat;
         room.Seats[s.Seat] = null; var p = room.Game.Players[s.Seat]; p.Stack = 0; p.Cards.Clear(); p.InHand = false;
-        s.Room = null; s.Seat = -1; s.Leaving = false;
+        s.Room = null; s.Seat = -1; s.Leaving = s.LeaveRequested = false;
         s.Peer?.Send(new Envelope { type = "left" });
     }
     public void Disconnect(Peer peer)
@@ -223,21 +230,34 @@ public sealed class Hub
                 if (room.Game.Actor >= 0)
                 {
                     var actor = room.Seats[room.Game.Actor];
-                    if (actor == null || actor.Leaving || now >= room.Deadline)
+                    if (actor == null || (actor.Leaving && !actor.LeaveRequested) || now >= room.Deadline)
                     {
                         // Deterministic timeout policy, not an AI opponent.
                         if (room.Game.Stage == Street.Draw) room.Game.Draw(room.Game.Actor, Array.Empty<int>());
                         else if (actor?.Leaving == true || room.Game.ToCall(room.Game.Actor) > 0) room.Game.Fold(room.Game.Actor);
                         else room.Game.Call(room.Game.Actor);
-                        AfterAction(room, now); Changed(room, now);
+                        AfterAction(room, now);
+                        bool removedAfterAction = false;
+                        if (actor?.LeaveRequested == true && room.Game.Stage != Street.Draw)
+                        { Remove(actor, room.Game.Stage != Street.Complete); removedAfterAction = true; }
+                        Changed(room, now); if (removedAfterAction) LobbyChanged();
                     }
                 }
                 bool boundary = room.Game.Stage == Street.Waiting || (room.Game.Stage == Street.Complete && now >= room.NextHand);
                 if (!boundary) continue;
                 bool removed = false;
                 foreach (var s in room.Seats.Where(s => s != null && (s.Leaving || room.Game.Players[s.Seat].Stack == 0)).ToArray()) { Remove(s); removed = true; }
-                if (removed) { Changed(room, now); LobbyChanged(); }
+                Array.Clear(room.ReservedSeats, 0, room.ReservedSeats.Length);
                 bool[] available = room.Seats.Select((s, i) => s != null && s.Peer != null && room.Game.Players[i].Stack > 0).ToArray();
+                if (available.Count(player => player) < 2)
+                {
+                    bool reset = room.Game.Stage == Street.Complete;
+                    if (reset) room.Game.ResetCompletedHandForWaiting();
+                    if (removed || reset) Changed(room, now);
+                    if (removed) LobbyChanged();
+                    continue;
+                }
+                if (removed) { Changed(room, now); LobbyChanged(); }
                 EntryMode[] entries = room.Seats.Select(s => s?.Entry ?? EntryMode.WaitForBigBlind).ToArray();
                 var plan = room.Orbit.Plan(available, entries); if (plan == null) continue;
                 // Track obligations for disconnected incumbents skipped by this rotation.
@@ -253,12 +273,14 @@ public sealed class Hub
                 }
                 foreach (int seat in plan.EntryPosts.Keys.ToArray()) plan.EntryPosts[seat] = room.Game.BigBlind;
                 for (int i = 0; i < 6; i++)
+                {
                     if (plan.Active[i])
                     {
                         var s = room.Seats[i];
                         if (s.MissedSmall && s.Entry == EntryMode.PostBigBlind && i != plan.BigBlind) plan.DeadPosts[i] = room.Game.SmallBlind;
                         s.Entry = EntryMode.Ready; s.MissedSmall = s.MissedBig = false;
                     }
+                }
                 room.Game.StartHand(plan); room.Orbit.Commit(plan); room.AnnouncedComplete = false;
                 AfterAction(room, now); Changed(room, now);
             }

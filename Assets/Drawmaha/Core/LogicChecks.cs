@@ -143,6 +143,7 @@ namespace Drawmaha
             var fold = new Game(1); fold.StartHand(); fold.Fold(3); fold.Fold(0); fold.Fold(1);
             Check(fold.Stage == Street.Complete && fold.Players[2].Stack == 1005 && fold.Pot == 0, "Uncontested pot settled once");
             Check(fold.LastPot == 15 && fold.Players[2].Payout == 15 && fold.Players[2].Scoop, "Uncontested winner receives scoop and settled pot is retained");
+
         }
         static void SimulationChecks()
         {
@@ -217,6 +218,7 @@ namespace Drawmaha
         {
             var orbit = new BlindOrbit(); bool[] seats = { true, false, true, false, true, false };
             var entries = Enumerable.Repeat(EntryMode.Ready, 6).ToArray();
+            Check(orbit.Plan(new[] { true, false, false, false, false, false }, entries) == null, "A lone player waits without starting a hand");
             var first = orbit.Plan(seats, entries); Check(first.Dealer == 0 && first.SmallBlind == 2 && first.BigBlind == 4, "Initial cash blind positions"); orbit.Commit(first);
             seats[1] = true; entries[1] = EntryMode.PostBigBlind;
             var join = orbit.Plan(seats, entries);

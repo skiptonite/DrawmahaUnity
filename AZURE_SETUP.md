@@ -43,7 +43,7 @@ Budget for the Container App **plus** Basic registry storage, image-build charge
 
    Replace the registry example with your own available name. The script prompts securely for an invite key; it creates billable resources only when **you run it**. It builds the image remotely with `az acr build`; Docker Desktop is not required for that route. If your subscription does not allow ACR Tasks/builds, build `Server/Dockerfile` locally with Docker, tag it for your registry, and push it instead.
 4. The script prints a `wss://<hostname>/ws` client address and `https://<hostname>/health` health URL. Check that health returns `{"status":"ok","protocol":2}`.
-5. Enter the `wss://` address and invite key in each Unity client's lobby. Use different usernames. The invite is not saved in the distributed game or PlayerPrefs; reconnect tokens are saved locally per username/server.
+5. Configure the generated `wss://` address as the client's default endpoint in `Assets/Drawmaha/Runtime/TableView.cs`, then build and distribute the client. Players enter the invite key and different usernames on the connect screen; the lobby appears after connecting. The endpoint is no longer loaded from PlayerPrefs, so the configured build default is always used. The invite is not saved in the distributed game or PlayerPrefs; reconnect tokens are saved locally per username/server.
 6. Verify the Azure portal shows Consumption, min/max 1, single revision, target port 8080, and insecure ingress disabled. Set your budget alert.
 
 Azure role assignments can take time to propagate. If the image pull fails immediately after creating `AcrPull`, verify the role scope and managed identity, wait for propagation, and retry the Container App creation. The script stops on errors and refuses to replace an already-running app.
@@ -62,12 +62,13 @@ Azure role assignments can take time to propagate. If the image pull fails immed
 
 **All game/session state is currently in memory.** Restarting or deploying a new image resets tables, buy-ins, and reconnect identities. There is no durable wallet/account database. The client recognizes a new server epoch and returns to the lobby. Drain tables and announce a maintenance window before upgrades.
 
-After all tables are empty, build a newly tagged image and update the app:
+After all tables are empty, run the updater from the project root. It builds a uniquely tagged image, asks you to type `EMPTY` before restarting the app, then checks the health endpoint. It requires an Azure CLI login and the existing registry/app names:
 
 ```powershell
-az acr build --registry <registry-name> --image drawmaha:<new-tag> --file Server/Dockerfile .
-az containerapp update --name drawmaha --resource-group drawmaha-rg --image <registry-name>.azurecr.io/drawmaha:<new-tag> --min-replicas 1 --max-replicas 1
+.\Azure\update.ps1 -RegistryName <registry-name>
 ```
+
+Pass `-ResourceGroupName` or `-AppName` if you used non-default names. The script does not verify that tables are empty; check this in the client before confirming. To adjust health polling, use `-HealthCheckAttempts` and `-HealthCheckIntervalSeconds`.
 
 Do not turn on multiple replicas or multiple live revisions. Two processes would create independent copies of the same tables; session affinity alone does not solve that. A future scale-out version needs explicit table ownership/routing and durable recovery/checkpoints. For private play, start with one replica and measure utilization before increasing its CPU/memory.
 

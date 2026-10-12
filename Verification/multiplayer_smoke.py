@@ -107,7 +107,10 @@ async def main():
         check(all(r['maxSeats']==6 and r['available']==6 for r in clients[0].rows),'Empty lobby configuration')
         await clients[0].send('join',tableId='standard',entryMode='wait')
         await asyncio.sleep(.35)
-        check(clients[0].table['stage']=='Waiting','One player cannot start')
+        waiting=clients[0].table
+        check(waiting['stage']=='Waiting','One player cannot start')
+        check(waiting['hand']==0 and waiting['board']==[] and waiting['pot']==0 and waiting['results']==[],'Empty table stays free of hand state')
+        check(all(not p['inHand'] and p['count']==0 and not p['winner'] for p in waiting['players']),'Waiting players receive no cards or win')
         await clients[1].send('join',tableId='standard',entryMode='wait')
         await wait_for(lambda:clients[0].table['hand']==1)
         check(sum(p['inHand'] for p in clients[0].table['players'])==2,'Auto-start with two players')
@@ -127,8 +130,6 @@ async def main():
         wrong=next(c for c in clients if c.table['yourSeat']!=t['actor'])
         check((await wrong.send('call'))['type']=='error','Out-of-turn command rejected')
         actor=next(c for c in clients if c.table['yourSeat']==t['actor'])
-        leave=await actor.send('leave')
-        check(leave['type']=='error' and 'Fold before leaving' in leave['message'],'Live player cannot leave before folding')
         check((await actor.send('call',revision=-999))['type']=='error','Stale command rejected')
         result=await actor.send('raise',raiseTo=999999)
         check(result['type']=='error','Over-pot raise rejected by authoritative server')
@@ -160,7 +161,7 @@ async def main():
         await wait_for(lambda:replacement.table is not None)
         check(replacement.table['yourSeat']==oldseat,'Reconnect retains seat')
         check(replacement.table['players'][oldseat]['username']=='Smoke4','Reconnect cannot change identity')
-        # Fold before leaving; a pending leave must not auto-fold an active player.
+        # Folded or completed players can leave immediately.
         async with asyncio.timeout(20):
             while True:
                 t=next(c.table for c in clients if c.table)
@@ -178,6 +179,75 @@ async def main():
                     folded=await action(clients,'fold')
                     check((await folded.send('leave'))['type']=='ack','Folded player can leave without auto-folding')
         await wait_for(lambda:all(c.table is None for c in clients),timeout=12)
+
+        queued=await Client('QueuedLeave').connect(); clients.append(queued)
+        leaving=await Client('HandLeave').connect(); clients.append(leaving)
+        partner=await Client('LeavePartner').connect(); clients.append(partner)
+        await leaving.send('join',tableId='micro',entryMode='wait')
+        await partner.send('join',tableId='micro',entryMode='wait')
+        await wait_for(lambda:leaving.table and leaving.table['hand']==1)
+        await queued.send('join',tableId='micro',entryMode='wait')
+        await wait_for(lambda:queued.table and queued.table['players'][queued.table['yourSeat']]['occupied'])
+        check(not queued.table['players'][queued.table['yourSeat']]['inHand'],'Queued player is not dealt into current hand')
+        check((await queued.send('leave'))['type']=='ack','Queued player can leave immediately')
+        await wait_for(lambda:queued.table is None)
+        check(queued.table is None,'Queued seat is released immediately')
+        check((await leaving.send('leave'))['type']=='ack','In-hand player can request deferred leave')
+        await wait_for(lambda:leaving.table and leaving.table['players'][leaving.table['yourSeat']]['leaving'])
+        await wait_for(lambda:partner.table and leaving.table and partner.table['revision']==leaving.table['revision'])
+        check(leaving.table is not None,'In-hand player remains seated until hand completion')
+        check(not leaving.table['players'][leaving.table['yourSeat']]['folded'],'Leave request does not fold the player')
+        other_view=partner.table['players'][leaving.table['yourSeat']]
+        check(not other_view['leaving'] and other_view['status']!='Leaving after hand','Deferred leave status is private to the requesting player')
+        normal_action_completed=False
+        async with asyncio.timeout(20):
+            while True:
+                t=leaving.table
+                if t is None: break
+                if t['actor']==leaving.table['yourSeat']:
+                    if not normal_action_completed:
+                        previous_revision=t['revision']
+                        if t['stage']=='Draw':
+                            result=await leaving.send('draw',discards=[])
+                            check(result['type']=='ack','Pending leave can take a normal draw action')
+                        else:
+                            result=await leaving.send('call')
+                            check(result['type']=='ack','Pending leave can take a normal betting action')
+                        normal_action_completed=True
+                        await wait_for(lambda:leaving.table is None or leaving.table['revision']>previous_revision)
+                        check(leaving.table is None or leaving.table['players'][leaving.table['yourSeat']]['leaving'],'Normal action keeps leave pending')
+                    else:
+                        check((await leaving.send('fold'))['type']=='ack','Pending leave can fold on its turn')
+                        break
+                if t['actor']<0:
+                    await asyncio.sleep(.025); continue
+                if leaving.table is not None and leaving.table['actor']!=leaving.table['yourSeat']:
+                    if leaving.table['stage']=='Draw': await action([leaving,partner],'draw',discards=[])
+                    else: await action([leaving,partner],'call')
+        check(normal_action_completed,'Leave request preserves normal turn options')
+        await wait_for(lambda:leaving.table is None)
+        await finish_hand([partner])
+        check(leaving.table is None,'In-hand player is removed after hand completion')
+        check((await partner.send('leave'))['type']=='ack','Remaining player can leave completed table')
+        await wait_for(lambda:partner.table is None)
+
+        showdown_leaving=await Client('ShowdownLeave').connect(); clients.append(showdown_leaving)
+        showdown_partner=await Client('ShowdownPartner').connect(); clients.append(showdown_partner)
+        await showdown_leaving.send('join',tableId='micro',entryMode='wait')
+        await showdown_partner.send('join',tableId='micro',entryMode='wait')
+        await wait_for(lambda:showdown_leaving.table and showdown_leaving.table['players'][showdown_leaving.table['yourSeat']]['inHand'])
+        check((await showdown_leaving.send('leave'))['type']=='ack','Showdown player can request deferred leave')
+        await finish_hand([showdown_leaving,showdown_partner])
+        await wait_for(lambda:showdown_partner.table and showdown_partner.table['stage']=='Complete')
+        check(showdown_leaving.table is not None,'Showdown leaver remains seated during the cooldown')
+        own_seat=showdown_leaving.table['yourSeat']
+        check(showdown_leaving.table['players'][own_seat]['leaving'] and showdown_leaving.table['board'] and showdown_leaving.table['results'],'Showdown leaver can see the board and winner')
+        await asyncio.sleep(.2)
+        check(showdown_leaving.table is not None and showdown_leaving.table['stage']=='Complete','Showdown leaver remains through the cooldown')
+        await wait_for(lambda:showdown_leaving.table is None,timeout=5)
+        check(showdown_partner.table['stage']=='Waiting' and showdown_partner.table['board']==[] and showdown_partner.table['pot']==0,'Single-player table clears showdown state and waits for players')
+        check((await showdown_partner.send('leave'))['type']=='ack','Last waiting player can leave')
+        await wait_for(lambda:showdown_partner.table is None)
         check(all(c.fault is None for c in clients),'No privacy assertion failures in readers')
         print(f'PASS: {assertions} multiplayer assertions; six real WebSocket clients, authorization, lobby, joins, actions, privacy, full draws, showdown, duplicate commands, reconnect and leave.')
     finally:
