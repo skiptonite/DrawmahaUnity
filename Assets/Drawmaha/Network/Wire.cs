@@ -2,16 +2,25 @@ using System;
 
 namespace Drawmaha.Network
 {
+    public static class WireProtocol
+    {
+        public const int Current = 3;
+        public const int WaitingPreferences = 3;
+    }
+
     [Serializable] public class Command
     {
         public string type, username, token, accessKey, tableId, entryMode, id;
         public int avatar, raiseTo, hand;
         public long revision;
+        public bool enabled;
+        public int callAmount;
         public int[] discards;
     }
     [Serializable] public class Envelope
     {
         public string type, message, token, epoch, id;
+        public int protocol;
         public LobbyRow[] tables;
         public TableState table;
     }
@@ -25,7 +34,8 @@ namespace Drawmaha.Network
     {
         public int seat, avatar, stack, bet, count, drawCount;
         public string username, status, entryMode;
-        public bool occupied, connected, inHand, folded, leaving, winner, scoop;
+        public bool occupied, connected, inHand, folded, leaving, winner, scoop, needsRebuy, drawLocked, checkFold, callQueued;
+        public int callAmount;
         public CardView[] cards;
     }
     [Serializable] public class TableState

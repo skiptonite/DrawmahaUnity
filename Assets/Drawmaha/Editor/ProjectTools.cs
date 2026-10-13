@@ -81,7 +81,7 @@ namespace Drawmaha.Editor
                         .TrimStart(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)
                         .Replace('\\', '/');
                     string entryPath = "macOS/Drawmaha.app/" + relativePath;
-                    var entry = archive.CreateEntry(entryPath, CompressionLevel.Optimal);
+                    var entry = archive.CreateEntry(entryPath, System.IO.Compression.CompressionLevel.Optimal);
                     bool executable = relativePath.StartsWith("Contents/MacOS/", System.StringComparison.Ordinal)
                         || relativePath.EndsWith(".dylib", System.StringComparison.OrdinalIgnoreCase);
                     entry.ExternalAttributes = executable

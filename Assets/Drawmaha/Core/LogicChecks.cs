@@ -107,6 +107,8 @@ namespace Drawmaha
             int[] pre = g.Players.Select(p => p.Stack).ToArray();
             int pot = g.Pot; while (g.Stage != Street.Complete) Passive(g);
             Check(g.LastPot == pot && g.Pot == 0, "Settled pot remains available after completion");
+            Check(!g.Results.Any(r => r.StartsWith("Main pot")), "Single pot is not labelled main pot");
+            Check(g.Results.Any(r => r.StartsWith("Omaha:")) && g.Results.Any(r => r.StartsWith("Draw:")), "Single-pot hand results use Omaha and Draw labels");
             Check(g.Players[0].Stack - pre[0] == pot / 2, "Draw half awarded to quads");
             Check(g.Players[1].Stack - pre[1] == pot / 2, "Omaha half awarded to Broadway");
 
@@ -116,7 +118,9 @@ namespace Drawmaha
             Replace(side.Players[0], "Ah Ad As 9d 8d"); Replace(side.Players[1], "Jc Tc 3d 4d 5h"); Replace(side.Players[2], "Kh Ks 6d 6c 8s"); Replace(side.Players[3], "Qd Qs 5d 5c 9h");
             while (side.Stage != Street.Complete) Passive(side);
             Check(side.Players[0].Stack == 40, "Short stack wins only main draw half");
+            Check(side.Results.Any(r => r.StartsWith("Main pot")), "Main pot is labelled when side pots exist");
             Check(side.Results.Any(r => r.StartsWith("Side pot")), "Side pots reported");
+            Check(side.Results.Any(r => r.StartsWith("Main pot · Omaha:")) && side.Results.Any(r => r.StartsWith("Side pot 1 · Draw:")), "Layered pot results identify each pot and hand");
             Check(side.Players.Sum(p => p.Stack) == 3020, "Side-pot chip conservation");
 
             var tie = new Game(19); tie.SmallBlind = 1; tie.BigBlind = 1; tie.StartHand(); Until(tie, Street.River);

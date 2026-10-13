@@ -187,7 +187,7 @@ namespace Drawmaha
         public void Draw(int seat, int[] indices)
         {
             if (Stage != Street.Draw || Actor != seat) throw new InvalidOperationException("Not this player's draw turn.");
-            if (indices == null || indices.Length > 2 || indices.Distinct().Count() != indices.Length || indices.Any(i => i < 0 || i >= 5)) throw new ArgumentException("Draw up to two distinct cards.");
+            ValidateDraw(indices);
             Card[] forbidden = indices.Select(i => Players[seat].Cards[i]).ToArray();
             foreach (Card card in forbidden) deck.Discard(card);
             foreach (int index in indices) Players[seat].Cards[index] = deck.Take(forbidden);
@@ -195,6 +195,11 @@ namespace Drawmaha
             Note(Players[seat].Name + " · " + Players[seat].Action); pending.Remove(seat); Actor = Next(seat, i => pending.Contains(i));
             if (Actor >= 0) return;
             DealBoard(1); Stage = Street.Turn; Note("Turn: " + Board[3]); BeginRound(Dealer, true);
+        }
+        public static void ValidateDraw(int[] indices)
+        {
+            if (indices == null || indices.Length > 2 || indices.Distinct().Count() != indices.Length || indices.Any(i => i < 0 || i >= 5))
+                throw new ArgumentException("Draw up to two distinct cards.");
         }
         void Complete()
         {
@@ -209,6 +214,7 @@ namespace Drawmaha
             var hole = Players.Select(p => p.InHand && !p.Folded ? HandEvaluator.Five(p.Cards).Score : -1).ToArray();
             var omaha = Players.Select(p => p.InHand && !p.Folded ? HandEvaluator.Omaha(p.Cards, Board).Score : -1).ToArray();
             var levels = Players.Select(p => p.Contributed).Where(c => c > 0).Distinct().OrderBy(c => c).ToArray();
+            int contestableLevels = levels.Count(level => Players.Count(p => p.Contributed >= level) > 1);
             int previous = 0; int number = 0;
             foreach (int level in levels)
             {
@@ -218,10 +224,13 @@ namespace Drawmaha
                 int[] eligible = contributors.Where(i => Players[i].InHand && !Players[i].Folded).ToArray();
                 if (eligible.Length == 0) throw new InvalidOperationException("A pot has no eligible winner.");
                 contestablePot += amount;
-                string label = number++ == 0 ? "Main pot" : "Side pot " + (number - 1);
+                string label = contestableLevels > 1
+                    ? (number == 0 ? "Main pot · " : "Side pot " + number + " · ")
+                    : "";
+                number++;
                 // The Omaha half receives the odd chip. Tied halves award odd chips left of button.
-                Award((amount + 1) / 2, eligible, omaha, label + " · Omaha");
-                Award(amount / 2, eligible, hole, label + " · Draw");
+                Award((amount + 1) / 2, eligible, omaha, label + "Omaha");
+                Award(amount / 2, eligible, hole, label + "Draw");
             }
             Complete();
         }

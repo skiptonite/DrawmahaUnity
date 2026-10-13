@@ -12,12 +12,14 @@ public sealed class CryptoRandom : Random
 public sealed class Session
 {
     public string Token, Name;
-    public int Avatar, Seat = -1, DisconnectedHand;
+    public int Avatar, Seat = -1, DisconnectedHand, LockedDrawHand = -1, AutoCallAmount = -1;
+    public int[] LockedDiscards;
     public Peer Peer;
     public Room Room;
     public DateTime LastSeen;
     public bool Leaving, MissedSmall, MissedBig;
     public bool LeaveRequested;
+    public bool CheckFold;
     public EntryMode Entry;
     public readonly Queue<string> Commands = new();
     public readonly HashSet<string> Seen = new();
@@ -56,6 +58,7 @@ public sealed class Room
             players = Enumerable.Range(0, 6).Select(i =>
             {
                 Session s = Seats[i]; var p = Game.Players[i];
+                bool needsRebuy = s != null && p.Stack == 0 && (Game.Stage == Street.Complete || !p.InHand);
                 bool reveal = s != null && ((i == own && livePlayers > 1) || (Game.ShowdownReached && p.InHand && !p.Folded));
                 return new SeatView {
                     seat = i, occupied = s != null, username = s?.Name ?? "Open seat", avatar = s?.Avatar ?? 0,
@@ -63,8 +66,13 @@ public sealed class Room
                     cards = reveal ? p.Cards.Select(ToCard).ToArray() : Array.Empty<CardView>(),
                     connected = s?.Peer != null, inHand = s != null && p.InHand, folded = p.Folded, drawCount = p.DrawCount,
                     winner = Game.Stage == Street.Complete && p.Payout > 0, scoop = Game.Stage == Street.Complete && p.Scoop,
+                    needsRebuy = needsRebuy,
+                    drawLocked = Game.Stage == Street.Draw && s?.LockedDrawHand == Game.HandNumber,
+                    checkFold = i == own && s?.CheckFold == true,
+                    callQueued = i == own && s != null && s.AutoCallAmount > 0 && s.AutoCallAmount == (Game.IsBetting ? Game.ToCall(i) : 0),
+                    callAmount = i == own && Game.IsBetting ? Game.ToCall(i) : 0,
                     entryMode = s?.Entry.ToString() ?? "", leaving = i == own && s?.Leaving == true,
-                    status = s == null ? "Available" : s.Peer == null ? "Disconnected" : !p.InHand ? (s.Entry == EntryMode.PostBigBlind ? "Post next eligible hand" : s.Entry == EntryMode.WaitForBigBlind ? "Waiting for big blind" : "Ready for next hand") : p.Folded ? "Folded" : p.Stack == 0 ? "All in" : p.Action
+                    status = s == null ? "Available" : s.Peer == null ? "Disconnected" : needsRebuy ? "Rebuy needed" : !p.InHand ? (s.Entry == EntryMode.PostBigBlind ? "Post next eligible hand" : s.Entry == EntryMode.WaitForBigBlind ? "Waiting for big blind" : "Ready for next hand") : p.Folded ? (p.Action == "Auto-fold" ? "Auto-fold" : "Folded") : p.Stack == 0 ? "All in" : p.Action
                 };
             }).ToArray()
         };
@@ -114,7 +122,7 @@ public sealed class Hub
                 sessions.Add(s.Token, s);
             }
             s.Peer = peer; s.LastSeen = DateTime.UtcNow; peer.Session = s;
-            peer.Send(new Envelope { type = "welcome", token = s.Token, epoch = Epoch });
+            peer.Send(new Envelope { type = "welcome", token = s.Token, epoch = Epoch, protocol = WireProtocol.Current });
             peer.Send(new Envelope { type = "lobby", tables = Rooms.Select(r => r.Lobby()).ToArray() });
             if (s.Room != null) Changed(s.Room, DateTime.UtcNow);
         }
@@ -145,9 +153,58 @@ public sealed class Hub
                     {
                         Player player = room.Game.Players[s.Seat];
                         bool handInProgress = room.Game.Stage != Street.Waiting && room.Game.Stage != Street.Complete;
-                        if (handInProgress && player.InHand && !player.Folded) { s.Leaving = true; s.LeaveRequested = true; }
+                        if (handInProgress && player.InHand) { s.Leaving = true; s.LeaveRequested = true; }
                         else Remove(s, handInProgress);
                         Changed(room, now); LobbyChanged();
+                    }
+                    else if (command.type == "rebuy")
+                    {
+                        Player player = room.Game.Players[s.Seat];
+                        if (player.Stack != 0 || (player.InHand && room.Game.Stage != Street.Complete)) throw new InvalidOperationException("Rebuy is available between hands.");
+                        player.Stack = room.BuyIn; player.Action = "Rebuy";
+                        Changed(room, now); LobbyChanged();
+                    }
+                    else if (command.type == "lockDraw")
+                    {
+                        if (command.hand != room.Game.HandNumber) throw new InvalidOperationException("Hand changed; review the latest state and try again.");
+                        Player player = room.Game.Players[s.Seat];
+                        if (room.Game.Stage != Street.Draw || !player.InHand || player.Folded) throw new InvalidOperationException("Draw choices can only be locked during the draw round.");
+                        if (s.LockedDrawHand == room.Game.HandNumber)
+                        {
+                            s.LockedDrawHand = -1; s.LockedDiscards = null;
+                            player.Action = "Waiting to draw";
+                        }
+                        else
+                        {
+                            if (player.Action == "Stand pat" || player.Action.StartsWith("Draw ", StringComparison.Ordinal))
+                                throw new InvalidOperationException("Your draw is already complete.");
+                            int[] discards = command.discards ?? Array.Empty<int>();
+                            Game.ValidateDraw(discards);
+                            s.LockedDrawHand = room.Game.HandNumber; s.LockedDiscards = (int[])discards.Clone();
+                            player.Action = discards.Length == 0 ? "Stand pat queued" : "Draw queued";
+                        }
+                        ResolveLockedDraws(room, now); Changed(room, now);
+                    }
+                    else if (command.type == "checkFold")
+                    {
+                        Player player = room.Game.Players[s.Seat];
+                        if (!room.Game.IsBetting || !player.CanAct || command.hand != room.Game.HandNumber)
+                            throw new InvalidOperationException("Check/Fold can only be set while waiting for your betting turn.");
+                        s.CheckFold = command.enabled;
+                        if (command.enabled) s.AutoCallAmount = -1;
+                        if (command.enabled && room.Game.Actor == s.Seat) ResolveAutomaticActions(room, now);
+                        Changed(room, now);
+                    }
+                    else if (command.type == "autoCall")
+                    {
+                        Player player = room.Game.Players[s.Seat];
+                        int callAmount = room.Game.IsBetting && player.CanAct ? room.Game.ToCall(s.Seat) : 0;
+                        if (!room.Game.IsBetting || !player.CanAct || command.hand != room.Game.HandNumber || callAmount <= 0 || command.callAmount != callAmount)
+                            throw new InvalidOperationException("Call amount changed or your turn has started.");
+                        s.AutoCallAmount = command.enabled ? callAmount : -1;
+                        if (command.enabled) s.CheckFold = false;
+                        if (command.enabled && room.Game.Actor == s.Seat) ResolveAutomaticActions(room, now);
+                        Changed(room, now);
                     }
                     else if (command.type == "entry")
                     {
@@ -168,9 +225,9 @@ public sealed class Hub
                             default: throw new ArgumentException("Unknown command.");
                         }
                         AfterAction(room, now);
-                        bool removed = false;
-                        if (s.LeaveRequested && command.type == "fold") { Remove(s, room.Game.Stage != Street.Complete); removed = true; }
-                        Changed(room, now); if (removed) LobbyChanged();
+                        ResolveLockedDraws(room, now);
+                        ResolveAutomaticActions(room, now);
+                        Changed(room, now);
                     }
                 }
                 s.Seen.Add(command.id); s.Commands.Enqueue(command.id);
@@ -194,6 +251,7 @@ public sealed class Hub
         for (int i = 0; i < room.Seats.Length; i++) if (room.Seats[i] == null && !room.ReservedSeats[i]) { seat = i; break; }
         if (seat < 0) throw new InvalidOperationException("Table is full.");
         s.Room = room; s.Seat = seat; s.Entry = entry; s.Leaving = s.LeaveRequested = false; s.MissedBig = s.MissedSmall = false;
+        s.CheckFold = false; s.AutoCallAmount = -1; s.LockedDrawHand = -1; s.LockedDiscards = null;
         room.Seats[seat] = s; var p = room.Game.Players[seat]; p.Name = s.Name; p.Stack = room.BuyIn; p.Bet = p.Contributed = p.DrawCount = p.Payout = 0; p.Folded = p.InHand = p.Scoop = false; p.Action = ""; p.Cards.Clear();
         room.Game.Note(s.Name + " joins seat " + (seat + 1) + (entry == EntryMode.PostBigBlind ? " · post big blind" : " · wait for big blind"));
         Changed(room, now); LobbyChanged();
@@ -204,6 +262,7 @@ public sealed class Hub
         room.ReservedSeats[s.Seat] = reserveSeat;
         room.Seats[s.Seat] = null; var p = room.Game.Players[s.Seat]; p.Stack = 0; p.Cards.Clear(); p.InHand = false;
         s.Room = null; s.Seat = -1; s.Leaving = s.LeaveRequested = false;
+        s.CheckFold = false; s.AutoCallAmount = -1; s.LockedDrawHand = -1; s.LockedDiscards = null;
         s.Peer?.Send(new Envelope { type = "left" });
     }
     public void Disconnect(Peer peer)
@@ -220,6 +279,63 @@ public sealed class Hub
         room.Deadline = now.AddSeconds(actionSeconds);
         if (room.Game.Stage == Street.Complete && !room.AnnouncedComplete) { room.AnnouncedComplete = true; room.NextHand = now.AddSeconds(showdownSeconds); }
     }
+    void ResolveLockedDraws(Room room, DateTime now)
+    {
+        while (room.Game.Stage == Street.Draw && room.Game.Actor >= 0)
+        {
+            int seat = room.Game.Actor; Session actor = room.Seats[seat];
+            if (actor == null || actor.LockedDrawHand != room.Game.HandNumber) return;
+            int[] discards = actor.LockedDiscards ?? Array.Empty<int>();
+            actor.LockedDrawHand = -1; actor.LockedDiscards = null;
+            room.Game.Draw(seat, discards); AfterAction(room, now);
+        }
+    }
+    void ClearStaleAutoCalls(Room room)
+    {
+        foreach (Session session in room.Seats.Where(s => s != null))
+        {
+            if (session.AutoCallAmount <= 0) continue;
+            Player player = room.Game.Players[session.Seat];
+            if (!room.Game.IsBetting || !player.CanAct || room.Game.ToCall(session.Seat) != session.AutoCallAmount)
+                session.AutoCallAmount = -1;
+        }
+    }
+    void ResolveAutomaticActions(Room room, DateTime now)
+    {
+        ClearStaleAutoCalls(room);
+        while (room.Game.IsBetting && room.Game.Actor >= 0)
+        {
+            int seat = room.Game.Actor;
+            Session actor = room.Seats[seat];
+            if (actor == null) return;
+            int callAmount = room.Game.ToCall(seat);
+            if (actor.CheckFold)
+            {
+                actor.CheckFold = false;
+                if (callAmount > 0)
+                {
+                    room.Game.Fold(seat);
+                    room.Game.Players[seat].Action = "Auto-fold";
+                }
+                else
+                {
+                    room.Game.Call(seat);
+                    room.Game.Players[seat].Action = "Auto-check";
+                }
+            }
+            else if (callAmount > 0 && actor.AutoCallAmount == callAmount)
+            {
+                actor.AutoCallAmount = -1;
+                room.Game.Call(seat);
+                room.Game.Players[seat].Action = "Auto-call";
+            }
+            else return;
+            AfterAction(room, now);
+            ClearStaleAutoCalls(room);
+        }
+        if (!room.Game.IsBetting)
+            foreach (Session session in room.Seats.Where(s => s != null)) session.CheckFold = false;
+    }
     public void Tick(DateTime now)
     {
         lock (gate)
@@ -234,19 +350,18 @@ public sealed class Hub
                     {
                         // Deterministic timeout policy, not an AI opponent.
                         if (room.Game.Stage == Street.Draw) room.Game.Draw(room.Game.Actor, Array.Empty<int>());
-                        else if (actor?.Leaving == true || room.Game.ToCall(room.Game.Actor) > 0) room.Game.Fold(room.Game.Actor);
+                        else if (room.Game.ToCall(room.Game.Actor) > 0) room.Game.Fold(room.Game.Actor);
                         else room.Game.Call(room.Game.Actor);
                         AfterAction(room, now);
-                        bool removedAfterAction = false;
-                        if (actor?.LeaveRequested == true && room.Game.Stage != Street.Draw)
-                        { Remove(actor, room.Game.Stage != Street.Complete); removedAfterAction = true; }
-                        Changed(room, now); if (removedAfterAction) LobbyChanged();
+                        ResolveLockedDraws(room, now);
+                        ResolveAutomaticActions(room, now);
+                        Changed(room, now);
                     }
                 }
                 bool boundary = room.Game.Stage == Street.Waiting || (room.Game.Stage == Street.Complete && now >= room.NextHand);
                 if (!boundary) continue;
                 bool removed = false;
-                foreach (var s in room.Seats.Where(s => s != null && (s.Leaving || room.Game.Players[s.Seat].Stack == 0)).ToArray()) { Remove(s); removed = true; }
+                foreach (var s in room.Seats.Where(s => s != null && s.Leaving).ToArray()) { Remove(s); removed = true; }
                 Array.Clear(room.ReservedSeats, 0, room.ReservedSeats.Length);
                 bool[] available = room.Seats.Select((s, i) => s != null && s.Peer != null && room.Game.Players[i].Stack > 0).ToArray();
                 if (available.Count(player => player) < 2)

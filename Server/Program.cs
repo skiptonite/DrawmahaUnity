@@ -11,7 +11,7 @@ builder.Services.AddSingleton<Hub>();
 builder.Services.AddHostedService<TableTicker>();
 var app = builder.Build();
 app.UseWebSockets(new WebSocketOptions { KeepAliveInterval = TimeSpan.FromSeconds(20) });
-app.MapGet("/health", () => Results.Ok(new { status = "ok", protocol = 2 }));
+app.MapGet("/health", () => Results.Ok(new { status = "ok", protocol = WireProtocol.Current }));
 app.MapGet("/", () => Results.Text("Drawmaha server · connect a Unity client to /ws"));
 app.Map("/ws", async context =>
 {

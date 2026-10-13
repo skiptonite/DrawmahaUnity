@@ -15,7 +15,7 @@ namespace Drawmaha
         TableState CurrentTable { get { return previewTable ?? network.Table; } }
         Texture2D[] backgrounds, pokerTables, cardBacks;
         int backgroundIndex, tableIndex, cardBackIndex, cardFaceStyle, avatarIndex;
-        const float CardDealSeconds = 0.14f, BoardDealSeconds = 0.38f;
+        const float CardDealSeconds = 0.14f, BoardDealSeconds = 0.38f, ChipFlightSeconds = 0.55f;
         readonly Color Accent = new Color(0.12f, 0.72f, 0.74f);
         readonly Color CardBackColor = new Color(0.075f, 0.24f, 0.38f);
         readonly Color CardFaceColor = new Color(0.98f, 0.97f, 0.92f);
@@ -25,11 +25,17 @@ namespace Drawmaha
         Font cardFont;
         bool ownsPokerChip;
         readonly bool[] selected = new bool[5];
+        readonly int[] chipFlightAmounts = new int[6];
+        readonly float[] chipFlightStarted = new float[6];
         readonly Vector2[] positions = { new Vector2(960, 790), new Vector2(405, 565), new Vector2(405, 345), new Vector2(960, 195), new Vector2(1515, 345), new Vector2(1515, 565) };
         readonly Vector2[] betPositions = { new Vector2(960, 628), new Vector2(610, 604), new Vector2(610, 410), new Vector2(960, 327), new Vector2(1310, 410), new Vector2(1310, 604) };
         GUIStyle text, small, bold, title, button, accentButton, input, betAmountStyle, betSliderStyle, betSliderThumbStyle;
-        string endpoint = "wss://drawmaha.blackmushroom-85b81292.centralus.azurecontainerapps.io/ws", username = "", invite = "", error = "", lastTable = "";
+        const string LocalhostEndpoint = "ws://127.0.0.1:8080/ws";
+        const string AzureEndpoint = "wss://drawmaha.blackmushroom-85b81292.centralus.azurecontainerapps.io/ws";
+        string endpoint = LocalhostEndpoint, username = "", invite = "", error = "", lastTable = "";
         bool post, showMenu, showHistory, showRules, showSettings;
+        bool? optimisticDrawLocked, optimisticCheckFold, optimisticCallQueued;
+        int optimisticCallAmount = -1;
         Vector2 historyScroll, customizationScroll;
         int lastHand = -1, shownBoard, lastActor = -99, customizationTab;
         float handStarted, nextBoardAt, raiseTo, errorUntil, leaveNoticeUntil, turnTimerStartedAt, turnTimerDuration;
@@ -56,6 +62,7 @@ namespace Drawmaha
         void Awake()
         {
             Application.targetFrameRate = 60;
+            Application.runInBackground = true;
             white = new Texture2D(1, 1); white.SetPixel(0, 0, Color.white); white.Apply();
             round = CircleTexture();
             betSliderThumb = CircleTexture(Accent);
@@ -82,7 +89,7 @@ namespace Drawmaha
             PlayerPrefs.DeleteKey("drawmaha.endpoint"); username = PlayerPrefs.GetString("drawmaha.username", "");
             network = gameObject.AddComponent<MultiplayerClient>();
             network.StateChanged += Received;
-            network.Failure += s => { error = s; errorUntil = Time.unscaledTime + 8; };
+            network.Failure += s => { ClearOptimisticPreferences(); error = s; errorUntil = Time.unscaledTime + 8; };
 #if UNITY_EDITOR
             if (UnityEditor.EditorPrefs.GetBool("Drawmaha.VisualPreview", false))
             {
@@ -111,6 +118,11 @@ namespace Drawmaha
             if (ownsPokerChip) Destroy(pokerChip);
             Destroy(buttonNormal); Destroy(buttonHover); Destroy(buttonPressed); Destroy(accentNormal); Destroy(accentHover); Destroy(betSliderThumb);
             foreach (Texture2D suit in cardSuits) if (suit != null) Destroy(suit);
+        }
+        void OnApplicationQuit()
+        {
+            if (previewTable == null && network != null && network.Connected && CurrentTable != null)
+                network.SendBeforeQuit(new Command { type = "leave" });
         }
         void LoadCardStyleAssets()
         {
@@ -144,6 +156,10 @@ namespace Drawmaha
         {
             if (state == null) return;
             UpdateHandLabels(state);
+            if (previous != null && state.id == previous.id && state.hand == previous.hand)
+                for (int i = 0; i < state.players.Length; i++)
+                    if (previous.players[i].bet > 0 && (state.players[i].bet == 0 || (previous.stage == "Flop" && state.stage == "Draw")))
+                    { chipFlightAmounts[i] = previous.players[i].bet; chipFlightStarted[i] = Time.unscaledTime; }
             bool wasLeaving = previous != null && previous.yourSeat >= 0 && previous.players[previous.yourSeat].leaving;
             bool isLeaving = state.yourSeat >= 0 && state.players[state.yourSeat].leaving;
             if (isLeaving && (previous == null || !wasLeaving))
@@ -154,9 +170,18 @@ namespace Drawmaha
             if (state.id != lastTable || state.hand != lastHand)
             {
                 lastTable = state.id; lastHand = state.hand; handStarted = Time.unscaledTime;
+                ClearOptimisticPreferences();
                 shownBoard = 0; nextBoardAt = handStarted + InitialDuration(state) + 0.1f;
                 Array.Clear(selected, 0, 5); previous = null;
+                Array.Clear(chipFlightAmounts, 0, chipFlightAmounts.Length);
             }
+            if (previous != null && previous.stage == "Draw" && state.stage != "Draw") Array.Clear(selected, 0, selected.Length);
+            if (previous != null && state.yourSeat >= 0 && state.yourSeat == previous.yourSeat
+                && previous.players[state.yourSeat].drawLocked && !state.players[state.yourSeat].drawLocked)
+                Array.Clear(selected, 0, selected.Length);
+            if (state.stage == "Draw" && state.yourSeat >= 0 && state.yourSeat < state.players.Length
+                && (state.players[state.yourSeat].status == "Stand pat" || state.players[state.yourSeat].status.StartsWith("Draw ", StringComparison.Ordinal)))
+                Array.Clear(selected, 0, selected.Length);
             if (state.actor == state.yourSeat && (lastActor != state.actor || previous == null || previous.stage != state.stage))
                 raiseTo = Math.Min(state.minRaise, state.maxRaise);
             if (state.actor != lastActor || previous == null || previous.stage != state.stage)
@@ -313,6 +338,11 @@ namespace Drawmaha
             button.hover.background = buttonHover; button.active.background = buttonPressed; button.border = new RectOffset(16, 16, 16, 16);
             button.padding = new RectOffset(12, 12, 8, 8);
             accentButton = new GUIStyle(button); accentButton.normal.background = accentNormal; accentButton.hover.background = accentHover;
+            accentButton.focused.background = accentNormal; accentButton.onNormal.background = accentNormal;
+            accentButton.onHover.background = accentHover; accentButton.onActive.background = buttonPressed;
+            accentButton.onFocused.background = accentNormal;
+            accentButton.onNormal.textColor = Ink; accentButton.onHover.textColor = Color.white;
+            accentButton.onActive.textColor = Color.white; accentButton.onFocused.textColor = Ink;
             input = new GUIStyle(GUI.skin.textField); input.fontSize = 19; input.padding = new RectOffset(12, 12, 10, 8);
             betAmountStyle = new GUIStyle(input); betAmountStyle.fontSize = 27; betAmountStyle.alignment = TextAnchor.MiddleCenter;
             betSliderStyle = new GUIStyle(GUI.skin.horizontalSlider);
@@ -343,7 +373,9 @@ namespace Drawmaha
             GUI.matrix = Matrix4x4.TRS(new Vector3((Screen.width - W * scale) / 2, (Screen.height - H * scale) / 2, 0), Quaternion.identity, new Vector3(scale, scale, 1));
             Fill(new Rect(0, 0, W, H), new Color(0.025f, 0.035f, 0.045f));
             if (BackgroundImage != null) GUI.DrawTexture(new Rect(0, 0, W, H), BackgroundImage, ScaleMode.ScaleAndCrop, true);
-            bool wasEnabled = GUI.enabled; GUI.enabled = !showRules && !showHistory && !showSettings;
+            bool needsRebuy = currentTable != null && currentTable.yourSeat >= 0 && currentTable.yourSeat < currentTable.players.Length
+                && currentTable.players[currentTable.yourSeat].needsRebuy;
+            bool wasEnabled = GUI.enabled; GUI.enabled = !showRules && !showHistory && !showSettings && !needsRebuy;
             Rect menuButton = new Rect(24, 24, 56, 56);
             if (GUI.Button(menuButton, new GUIContent("", showMenu ? "Close menu" : "Open menu"), button)) showMenu = !showMenu;
             Fill(new Rect(39, 39, 26, 3), Ink, white);
@@ -363,7 +395,8 @@ namespace Drawmaha
             }
             Label(42, 1038, 1470, 25, Time.unscaledTime < errorUntil ? error : network.Status + (previewTable != null ? "  ·  Visual preview" : "  ·  Play chips"), small);
             GUI.enabled = wasEnabled;
-            if (showRules) Rules(); if (showHistory) History(); if (showSettings) Settings();
+            if (needsRebuy) RebuyDialog(currentTable);
+            else { if (showRules) Rules(); if (showHistory) History(); if (showSettings) Settings(); }
             GUI.matrix = old;
         }
         void Menu(TableState currentTable)
@@ -373,11 +406,23 @@ namespace Drawmaha
             if (Button(new Rect(38, 158, 242, 48), "Rules")) { showRules = true; showMenu = false; }
             if (Button(new Rect(38, 214, 242, 48), "History", currentTable != null)) { showHistory = true; showMenu = false; }
             bool canLeaveTable = network.Connected && currentTable != null && currentTable.yourSeat >= 0
-                && !currentTable.players[currentTable.yourSeat].leaving && !network.CommandPending;
+                && !currentTable.players[currentTable.yourSeat].leaving;
             if (Button(new Rect(38, 270, 242, 48), "Leave Table", canLeaveTable))
             {
                 network.Send(new Command { type = "leave" }); showMenu = false;
             }
+        }
+        void RebuyDialog(TableState state)
+        {
+            Fill(new Rect(0, 0, W, H), new Color(0, 0, 0, 0.62f));
+            Fill(new Rect(650, 390, 620, 300), Panel, rounded);
+            Label(700, 425, 520, 48, "OUT OF CHIPS", Style(30, Ink, FontStyle.Bold, TextAnchor.MiddleCenter));
+            Label(700, 483, 520, 42, "Rebuy for " + (state.bigBlind * 100).ToString("N0") + " chips?",
+                Style(21, Dim, FontStyle.Normal, TextAnchor.MiddleCenter));
+            bool connected = network.Connected;
+            bool canRebuy = connected && !network.CommandPending;
+            if (Button(new Rect(700, 555, 250, 58), "Leave Table", connected)) network.Send(new Command { type = "leave" });
+            if (Button(new Rect(970, 555, 250, 58), "Rebuy", canRebuy, true)) network.Send(new Command { type = "rebuy" });
         }
         void Lobby()
         {
@@ -445,7 +490,10 @@ namespace Drawmaha
                 Controls(t);
                 return;
             }
-            Label(720, 386, 480, 32, "POT  " + t.pot.ToString("N0"), Style(24, Color.black, FontStyle.Bold, TextAnchor.MiddleCenter));
+            Rect potTracker = new Rect(840, 376, 240, 48);
+            Fill(potTracker, new Color(0.30f, 0.32f, 0.34f, 0.96f), rounded);
+            Label(potTracker.x + 8, potTracker.y, potTracker.width - 16, potTracker.height,
+                "POT  " + t.pot.ToString("N0"), Style(23, Color.white, FontStyle.Bold, TextAnchor.MiddleCenter));
             for (int i = 0; i < shownBoard; i++)
             {
                 float elapsed = Time.unscaledTime - (nextBoardAt - BoardDealSeconds);
@@ -468,7 +516,7 @@ namespace Drawmaha
             if (!p.inHand || p.folded || t.players.Count(player => player.inHand && !player.folded) <= 1)
             {
                 DrawDealerButton(t, actual, box);
-                DrawBetChip(p, relative);
+                DrawBetChip(p, relative, actual, t.stage);
                 return;
             }
             int[] order = Enumerable.Range(1, 6).Select(n => (t.dealer + n + 6) % 6).Where(i => t.players[i].inHand).ToArray();
@@ -492,7 +540,7 @@ namespace Drawmaha
             }
             DrawSeatPanel(p, box, acting);
             DrawDealerButton(t, actual, box);
-            DrawBetChip(p, relative);
+            DrawBetChip(p, relative, actual, t.stage);
             if (own && !string.IsNullOrEmpty(drawHandLabel))
             {
                 string omahaText = "Omaha hand: " + omahaHandLabel;
@@ -508,7 +556,7 @@ namespace Drawmaha
                 Label(badge.x + 8, badge.y + 1, badge.width - 16, 20, omahaText, handStyle);
                 Label(badge.x + 8, badge.y + 21, badge.width - 16, 20, drawText, handStyle);
             }
-            if (own && t.actor == actual && t.stage == "Draw" && (previewTable != null || network.Connected) && !network.CommandPending && GUI.enabled && Time.unscaledTime >= handStarted + InitialDuration(t))
+            if (own && t.stage == "Draw" && !p.drawLocked && (previewTable != null || network.Connected) && !network.CommandPending && GUI.enabled && Time.unscaledTime >= handStarted + InitialDuration(t))
             {
                 // Reverse hit order matches the visual stacking of overlapping cards.
                 for (int i = visible - 1; i >= 0; i--)
@@ -529,17 +577,18 @@ namespace Drawmaha
             Rect actionBox = new Rect(box.center.x - 64, box.yMax - 4, 128, 28);
             Rect avatarBox = new Rect(box.x + 8, box.y + 9, 44, 44);
             Fill(actionBox, new Color(0.045f, 0.105f, 0.145f, 0.98f), rounded);
-            Fill(box, new Color(0.025f, 0.075f, 0.13f, 0.98f), rounded);
+            Fill(box, p.winner ? new Color(0.12f, 0.29f, 0.17f, 0.99f) : new Color(0.025f, 0.075f, 0.13f, 0.98f), rounded);
             Fill(new Rect(avatarBox.x - 2, avatarBox.y - 2, avatarBox.width + 4, avatarBox.height + 4), new Color(0.72f, 0.82f, 0.86f), round);
             Fill(avatarBox, AvatarColor(p.avatar), round);
             Label(avatarBox.x, avatarBox.y, avatarBox.width, avatarBox.height, AvatarInitials(p.username),
                 Style(17, Color.white, FontStyle.Bold, TextAnchor.MiddleCenter));
-            Label(box.x, box.y + 6, box.width, 23, p.username,
-                Style(15, Ink, FontStyle.Bold, TextAnchor.MiddleCenter));
+            GUIStyle nameStyle = Style(14, Ink, FontStyle.Bold, TextAnchor.MiddleLeft);
+            nameStyle.wordWrap = false; nameStyle.clipping = TextClipping.Ellipsis;
+            Label(avatarBox.xMax + 7, box.y + 6, box.xMax - avatarBox.xMax - 14, 23, p.username, nameStyle);
             Label(box.x, box.y + 33, box.width, 23, p.stack.ToString("N0") + " Chips",
                 Style(17, Accent, FontStyle.Normal, TextAnchor.MiddleCenter));
             Label(actionBox.x + 4, actionBox.y, actionBox.width - 8, actionBox.height, PlayerAction(p),
-                Style(13, Accent, FontStyle.Bold, TextAnchor.MiddleCenter));
+                Style(13, p.winner ? new Color(0.52f, 0.95f, 0.57f) : Accent, FontStyle.Bold, TextAnchor.MiddleCenter));
             if (acting && turnTimerDuration > 0)
             {
                 float remaining = Mathf.Clamp01(1f - (Time.unscaledTime - turnTimerStartedAt) / turnTimerDuration);
@@ -578,7 +627,10 @@ namespace Drawmaha
         }
         static string PlayerAction(SeatView player)
         {
+            if (player.winner) return "WINNER";
+            if (player.drawLocked) return player.status == "Stand pat queued" ? "Pat queued" : "Draw queued";
             string status = player.status ?? "";
+            if (status == "Auto-check" || status == "Auto-fold" || status == "Auto-call") return status;
             if (status == "Waiting for big blind") return "Wait for BB";
             if (status == "Post next eligible hand") return "Post next";
             if (status == "Ready for next hand") return "Next hand";
@@ -619,13 +671,25 @@ namespace Drawmaha
             Fill(new Rect(box.x + box.width - 20, box.y - 12, 26, 26), Accent, round);
             Label(box.x + box.width - 20, box.y - 11, 26, 23, "D", Style(13, Panel, FontStyle.Bold, TextAnchor.MiddleCenter));
         }
-        void DrawBetChip(SeatView player, int relative)
+        void DrawBetChip(SeatView player, int relative, int actual, string stage)
         {
-            if (player.bet <= 0) return;
-            Vector2 center = betPositions[relative];
+            Vector2 center;
+            int amount;
+            float alpha = 1;
+            if (stage == "Draw" && chipFlightAmounts[actual] <= 0) return;
+            if (stage != "Draw" && player.bet > 0) { center = betPositions[relative]; amount = player.bet; }
+            else
+            {
+                amount = chipFlightAmounts[actual];
+                float progress = (Time.unscaledTime - chipFlightStarted[actual]) / ChipFlightSeconds;
+                if (amount <= 0 || progress >= 1) { chipFlightAmounts[actual] = 0; return; }
+                progress = Mathf.Clamp01(progress);
+                center = Vector2.Lerp(betPositions[relative], new Vector2(960, 386), Mathf.SmoothStep(0, 1, progress));
+                alpha = 1 - progress;
+            }
             Rect chip = new Rect(center.x - 23, center.y - 23, 46, 46);
-            Fill(chip, Color.white, pokerChip);
-            Label(chip.x - 15, chip.yMax + 1, chip.width + 30, 21, player.bet.ToString("N0"), Style(15, new Color(0.035f, 0.07f, 0.045f), FontStyle.Bold, TextAnchor.MiddleCenter));
+            Fill(chip, new Color(1, 1, 1, alpha), pokerChip);
+            Label(chip.x - 15, chip.yMax + 1, chip.width + 30, 21, amount.ToString("N0"), Style(15, new Color(0.035f, 0.07f, 0.045f, alpha), FontStyle.Bold, TextAnchor.MiddleCenter));
         }
         static Matrix4x4 RotationAtCanvasPivot(float angle, Vector2 pivot)
         {
@@ -716,21 +780,84 @@ namespace Drawmaha
         {
             Fill(new Rect(1230, 880, 650, 184), Panel, rounded);
             var own = t.players[t.yourSeat];
+            if (t.actor == t.yourSeat || !IsBettingStage(t.stage))
+            {
+                optimisticCheckFold = null; optimisticCallQueued = null; optimisticCallAmount = -1;
+            }
+            if (t.stage != "Draw") optimisticDrawLocked = null;
             bool animationsDone = Time.unscaledTime >= handStarted + InitialDuration(t) && shownBoard == t.board.Length;
             bool enabled = network.Connected && !network.CommandPending && animationsDone;
+            bool preferenceEnabled = network.Connected && !network.CommandPending;
+            bool bettingPreferenceEnabled = preferenceEnabled && network.SupportsWaitingPreferences;
             if (!own.inHand || t.stage == "Waiting")
             {
                 Label(1254, 894, 580, 29, own.status, small);
                 if (Button(new Rect(1250, 966, 275, 52), "Post big blind", enabled)) network.Send(new Command { type = "entry", entryMode = "post" });
                 if (Button(new Rect(1537, 966, 318, 52), "Wait for big blind", enabled)) network.Send(new Command { type = "entry", entryMode = "wait" }); return;
             }
-            if (t.stage == "Complete") { Label(1254, 925, 580, 40, "Next hand starts automatically when two players are available.", small); return; }
-            if (t.actor != t.yourSeat || own.folded) { Label(1254, 925, 580, 44, animationsDone ? "Waiting for the other players…" : "Dealing cards…", small); return; }
+            if (t.stage == "Complete") return;
             if (t.stage == "Draw")
             {
-                int count = selected.Count(s => s); Label(1254, 901, 570, 45, "Select up to two cards above.  " + count + "/2 selected.", small);
-                if (Button(new Rect(1250, 966, 605, 52), count == 0 ? "Stand pat" : "Draw " + count + " cards", enabled, true))
-                { network.Send(new Command { type = "draw", discards = Enumerable.Range(0, 5).Where(i => selected[i]).ToArray() }); Array.Clear(selected, 0, 5); } return;
+                int count = selected.Count(s => s); bool acting = t.actor == t.yourSeat;
+                bool nextDrawLocked = false;
+                bool drawLocked = CurrentPreference(ref optimisticDrawLocked, own.drawLocked);
+                if (drawLocked)
+                {
+                    string lockedChoice = count == 0 ? "Stand pat is queued" : "Draw " + count + " is queued";
+                    Label(1254, 901, 570, 45, lockedChoice, small);
+                    if (!acting && PreferenceButton(new Rect(1250, 966, 605, 52), count == 0 ? "Stand Pat" : "Draw " + count, true, preferenceEnabled, out nextDrawLocked))
+                    {
+                        optimisticDrawLocked = nextDrawLocked;
+                        network.Send(new Command { type = "lockDraw", discards = Enumerable.Range(0, 5).Where(i => selected[i]).ToArray() });
+                    }
+                    return;
+                }
+                if (own.status == "Stand pat" || own.status.StartsWith("Draw ", StringComparison.Ordinal))
+                {
+                    Label(1254, 925, 580, 44, "Draw complete", small); return;
+                }
+                Label(1254, 901, 570, 45, acting ? "Select up to two cards above.  " + count + "/2 selected." : "Select discards now, then lock your choice.  " + count + "/2 selected.", small);
+                string drawLabel = count == 0 ? (acting ? "Stand pat" : "Queue Stand Pat")
+                    : acting ? "Draw " + count + " cards" : "Queue Draw " + count + " cards";
+                bool drawPressed = acting
+                    ? Button(new Rect(1250, 966, 605, 52), drawLabel, enabled, true)
+                    : PreferenceButton(new Rect(1250, 966, 605, 52), drawLabel, false, preferenceEnabled, out nextDrawLocked);
+                if (drawPressed)
+                {
+                    if (acting) network.Send(new Command { type = "draw", discards = Enumerable.Range(0, 5).Where(i => selected[i]).ToArray() });
+                    else
+                    {
+                        optimisticDrawLocked = nextDrawLocked;
+                        network.Send(new Command { type = "lockDraw", discards = Enumerable.Range(0, 5).Where(i => selected[i]).ToArray() });
+                    }
+                    if (acting) Array.Clear(selected, 0, selected.Length);
+                }
+                return;
+            }
+            if (t.actor != t.yourSeat || own.folded)
+            {
+                string waitingMessage = !network.SupportsWaitingPreferences ? "Server update required for waiting-action preferences"
+                    : own.checkFold ? "Check/Fold queued · waiting for your turn"
+                    : own.callQueued ? "Auto-call queued · waiting for your turn"
+                    : animationsDone ? "Waiting for the other players…" : "Dealing cards…";
+                Label(1254, 901, 580, 44, waitingMessage, small);
+                if (t.actor != t.yourSeat && own.inHand && !own.folded && own.stack > 0 && IsBettingStage(t.stage))
+                {
+                    bool checkFold = CurrentPreference(ref optimisticCheckFold, own.checkFold);
+                    if (PreferenceButton(new Rect(1250, 966, 282, 56), "Check/Fold", checkFold, bettingPreferenceEnabled, out bool nextCheckFold))
+                    {
+                        optimisticCheckFold = nextCheckFold;
+                        network.Send(new Command { type = "checkFold", enabled = nextCheckFold });
+                    }
+                    bool callQueued = CurrentCallPreference(own.callQueued, t.call);
+                    if (t.call > 0 && PreferenceButton(new Rect(1540, 966, 315, 56), "Call " + t.call.ToString("N0"), callQueued, bettingPreferenceEnabled, out bool nextCallQueued))
+                    {
+                        optimisticCallQueued = nextCallQueued;
+                        optimisticCallAmount = t.call;
+                        network.Send(new Command { type = "autoCall", enabled = nextCallQueued, callAmount = t.call });
+                    }
+                }
+                return;
             }
             bool callAllIn = t.call > 0 && t.call >= own.stack;
             if (callAllIn)
@@ -775,6 +902,49 @@ namespace Drawmaha
         {
             int reference = Math.Max(table.bigBlind, player.bet + table.call);
             return Mathf.Clamp(reference * multiple, min, max);
+        }
+        bool CurrentPreference(ref bool? optimisticValue, bool authoritativeValue)
+        {
+            if (!optimisticValue.HasValue) return authoritativeValue;
+            if (optimisticValue.Value == authoritativeValue || !network.Connected)
+            {
+                optimisticValue = null;
+                return authoritativeValue;
+            }
+            return optimisticValue.Value;
+        }
+        bool CurrentCallPreference(bool authoritativeValue, int callAmount)
+        {
+            if (!optimisticCallQueued.HasValue) return authoritativeValue;
+            if (callAmount != optimisticCallAmount || optimisticCallQueued.Value == authoritativeValue || !network.Connected)
+            {
+                optimisticCallQueued = null;
+                optimisticCallAmount = -1;
+                return authoritativeValue;
+            }
+            return optimisticCallQueued.Value;
+        }
+        void ClearOptimisticPreferences()
+        {
+            optimisticDrawLocked = null; optimisticCheckFold = null; optimisticCallQueued = null;
+            optimisticCallAmount = -1;
+        }
+        bool PreferenceButton(Rect rect, string label, bool isChecked, bool enabled, out bool nextChecked)
+        {
+            bool wasEnabled = GUI.enabled;
+            GUI.enabled = wasEnabled && enabled;
+            nextChecked = GUI.Toggle(rect, isChecked, GUIContent.none, accentButton);
+            GUI.enabled = wasEnabled;
+            Rect check = new Rect(rect.x + 14, rect.center.y - 12, 24, 24);
+            Fill(new Rect(check.x - 2, check.y - 2, check.width + 4, check.height + 4), new Color(0.72f, 0.78f, 0.80f));
+            Fill(check, nextChecked ? Accent : new Color(0.025f, 0.045f, 0.065f));
+            if (nextChecked) Label(check.x, check.y - 1, check.width, check.height, "✓", Style(18, Color.white, FontStyle.Bold, TextAnchor.MiddleCenter));
+            Label(rect.x + 48, rect.y, rect.width - 56, rect.height, label, Style(17, Ink, FontStyle.Bold, TextAnchor.MiddleCenter));
+            return nextChecked != isChecked;
+        }
+        static bool IsBettingStage(string stage)
+        {
+            return stage == "Preflop" || stage == "Flop" || stage == "Turn" || stage == "River";
         }
         void DrawRaiseAmount(Rect rect, int min, int max)
         {

@@ -13,6 +13,8 @@ namespace Drawmaha.Network
     {
         public string Endpoint = "wss://drawmaha.blackmushroom-85b81292.centralus.azurecontainerapps.io/ws";
         public bool Connected { get; private set; }
+        public int ServerProtocol { get; private set; }
+        public bool SupportsWaitingPreferences { get { return ServerProtocol >= WireProtocol.WaitingPreferences; } }
         public string Status { get; private set; } = "Not connected";
         public TableState Table { get; private set; }
         public LobbyRow[] Tables { get; private set; } = new LobbyRow[0];
@@ -33,7 +35,7 @@ namespace Drawmaha.Network
         string TokenKey { get { return "drawmaha.token." + Endpoint + "." + (username ?? "").ToLowerInvariant(); } }
         public void Connect(string endpoint, string name, int avatarIndex, string invite)
         {
-            Disconnect(); Table = null; Tables = new LobbyRow[0]; Endpoint = endpoint.Trim(); username = name.Trim(); avatar = avatarIndex; accessKey = invite;
+            Disconnect(); ServerProtocol = 0; Table = null; Tables = new LobbyRow[0]; Endpoint = endpoint.Trim(); username = name.Trim(); avatar = avatarIndex; accessKey = invite;
             token = PlayerPrefs.GetString(TokenKey, ""); wantConnection = true; BeginConnect();
         }
         void BeginConnect()
@@ -94,8 +96,9 @@ namespace Drawmaha.Network
                     if (packet.type == "welcome")
                     {
                         bool changed = epoch != null && epoch != packet.epoch;
-                        epoch = packet.epoch; token = packet.token; PlayerPrefs.SetString(TokenKey, token); PlayerPrefs.Save();
-                        Connected = true; connectInProgress = false; Status = changed ? "Server restarted. Tables were reset." : "Connected";
+                        epoch = packet.epoch; token = packet.token; ServerProtocol = packet.protocol; PlayerPrefs.SetString(TokenKey, token); PlayerPrefs.Save();
+                        Connected = true; connectInProgress = false;
+                        Status = !SupportsWaitingPreferences ? "Server update required for waiting-action preferences." : changed ? "Server restarted. Tables were reset." : "Connected";
                         if (changed) Table = null;
                         heartbeat = Time.unscaledTime + 15;
                     }
@@ -103,7 +106,7 @@ namespace Drawmaha.Network
                     else if (packet.type == "state") { Table = packet.table; StateReceivedAt = Time.unscaledTime; StateChanged?.Invoke(Table); }
                     else if (packet.type == "left") { Table = null; pendingId = null; }
                     else if (packet.type == "ack" && packet.id == pendingId) pendingId = null;
-                    else if (packet.type == "error")
+                    else if (packet.type == "error" && (packet.id == pendingId || string.IsNullOrEmpty(packet.id)))
                     {
                         pendingId = null; Status = packet.message; Failure?.Invoke(packet.message);
                         if (!Connected) { wantConnection = false; connectInProgress = false; }
@@ -121,13 +124,24 @@ namespace Drawmaha.Network
         }
         public void Send(Command command, bool track = true)
         {
-            if (!Connected || (track && CommandPending)) return;
+            bool interruptPending = command.type == "leave";
+            if (!Connected || (track && CommandPending && !interruptPending)) return;
             if (track)
             {
                 command.id = Guid.NewGuid().ToString("N"); pendingId = command.id; pendingAt = Time.unscaledTime;
                 if (Table != null) { command.tableId = Table.id; command.hand = Table.hand; command.revision = Table.revision; }
             }
             _ = SendText(JsonUtility.ToJson(command), socket, cancel.Token, generation);
+        }
+        public void SendBeforeQuit(Command command)
+        {
+            if (!Connected || socket == null || Table == null) return;
+            command.id = Guid.NewGuid().ToString("N"); command.tableId = Table.id;
+            command.hand = Table.hand; command.revision = Table.revision;
+            string json = JsonUtility.ToJson(command); ClientWebSocket peer = socket;
+            CancellationToken ct = cancel.Token; int run = generation;
+            try { Task.Run(() => SendText(json, peer, ct, run)).Wait(500); }
+            catch (AggregateException) { }
         }
         async Task SendText(string json, ClientWebSocket peer, CancellationToken ct, int run)
         {
