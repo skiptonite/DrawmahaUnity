@@ -41,6 +41,7 @@ namespace Drawmaha
         public int HandNumber { get; private set; }
         public bool ShowdownReached { get; private set; }
         public int LastPot { get; private set; }
+        public bool IsAwaitingAction(int seat) => IsBetting && seat >= 0 && seat < Players.Length && pending.Contains(seat) && Players[seat].CanAct;
         int contestablePot;
         public int SmallBlind = 5, BigBlind = 10;
         public int Pot { get { return Players.Sum(p => p.Contributed); } }

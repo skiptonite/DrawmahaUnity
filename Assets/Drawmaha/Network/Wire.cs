@@ -4,8 +4,8 @@ namespace Drawmaha.Network
 {
     public static class WireProtocol
     {
-        public const int Current = 3;
-        public const int WaitingPreferences = 3;
+        public const int Current = 6;
+        public const int WaitingPreferences = 5;
     }
 
     [Serializable] public class Command
@@ -30,12 +30,26 @@ namespace Drawmaha.Network
         public int smallBlind, bigBlind, buyIn, occupied, available, maxSeats;
     }
     [Serializable] public class CardView { public int rank, suit; }
+    [Serializable] public class HandHistoryPlayerView
+    {
+        public string username;
+        public int avatar;
+        public bool folded, revealed;
+        public CardView[] cards;
+    }
+    [Serializable] public class HandHistoryView
+    {
+        public int hand;
+        public bool showdown;
+        public CardView[] board;
+        public HandHistoryPlayerView[] players;
+    }
     [Serializable] public class SeatView
     {
         public int seat, avatar, stack, bet, count, drawCount;
         public string username, status, entryMode;
-        public bool occupied, connected, inHand, folded, leaving, winner, scoop, needsRebuy, drawLocked, checkFold, callQueued;
-        public int callAmount;
+        public bool occupied, connected, inHand, folded, leaving, winner, scoop, needsRebuy, drawLocked, checkFold, callQueued, waitingToAct;
+        public int callAmount, queuedDrawCount;
         public CardView[] cards;
     }
     [Serializable] public class TableState
@@ -46,6 +60,7 @@ namespace Drawmaha.Network
         public bool canRaise, showdown;
         public SeatView[] players;
         public CardView[] board;
+        public HandHistoryView[] handHistory;
         public string[] results, history;
     }
 }

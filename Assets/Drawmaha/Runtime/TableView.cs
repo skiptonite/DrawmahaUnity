@@ -14,7 +14,7 @@ namespace Drawmaha
         TableState previewTable;
         TableState CurrentTable { get { return previewTable ?? network.Table; } }
         Texture2D[] backgrounds, pokerTables, cardBacks;
-        int backgroundIndex, tableIndex, cardBackIndex, cardFaceStyle, avatarIndex;
+        int backgroundIndex, tableIndex, cardBackIndex, cardFaceStyle, avatarIndex, holeCardOrderMode;
         const float CardDealSeconds = 0.14f, BoardDealSeconds = 0.38f, ChipFlightSeconds = 0.55f;
         readonly Color Accent = new Color(0.12f, 0.72f, 0.74f);
         readonly Color CardBackColor = new Color(0.075f, 0.24f, 0.38f);
@@ -25,11 +25,12 @@ namespace Drawmaha
         Font cardFont;
         bool ownsPokerChip;
         readonly bool[] selected = new bool[5];
+        readonly int[] holeCardOrder = new int[5];
         readonly int[] chipFlightAmounts = new int[6];
         readonly float[] chipFlightStarted = new float[6];
         readonly Vector2[] positions = { new Vector2(960, 790), new Vector2(405, 565), new Vector2(405, 345), new Vector2(960, 195), new Vector2(1515, 345), new Vector2(1515, 565) };
         readonly Vector2[] betPositions = { new Vector2(960, 628), new Vector2(610, 604), new Vector2(610, 410), new Vector2(960, 327), new Vector2(1310, 410), new Vector2(1310, 604) };
-        GUIStyle text, small, bold, title, button, accentButton, input, betAmountStyle, betSliderStyle, betSliderThumbStyle;
+        GUIStyle text, small, bold, title, button, accentButton, holeOrderTabButton, holeOrderTabAccentButton, input, betAmountStyle, betSliderStyle, betSliderThumbStyle;
         const string LocalhostEndpoint = "ws://127.0.0.1:8080/ws";
         const string AzureEndpoint = "wss://drawmaha.blackmushroom-85b81292.centralus.azurecontainerapps.io/ws";
         string endpoint = LocalhostEndpoint, username = "", invite = "", error = "", lastTable = "";
@@ -86,6 +87,7 @@ namespace Drawmaha
             cardBackIndex = FindImageIndex(cardBacks, "drawmaha.cardback.asset", "drawmaha_blue_card_back_720x1008");
             if (cardBacks.Length > 0) cardBack = cardBacks[cardBackIndex];
             cardFaceStyle = Mathf.Clamp(PlayerPrefs.GetInt("drawmaha.card.face.style", 0), 0, 2);
+            holeCardOrderMode = Mathf.Clamp(PlayerPrefs.GetInt("drawmaha.hole.card.order", 0), 0, 2);
             PlayerPrefs.DeleteKey("drawmaha.endpoint"); username = PlayerPrefs.GetString("drawmaha.username", "");
             network = gameObject.AddComponent<MultiplayerClient>();
             network.StateChanged += Received;
@@ -209,6 +211,35 @@ namespace Drawmaha
             omahaHandLabel = state.board != null && state.board.Length >= 3
                 ? HandEvaluator.Omaha(hole, state.board.Select(card => new Drawmaha.Card(card.rank, card.suit)).ToArray()).Name
                 : "Waiting for flop";
+        }
+        int BuildHoleCardOrder(CardView[] cards)
+        {
+            int count = Math.Min(cards == null ? 0 : cards.Length, holeCardOrder.Length);
+            for (int i = 0; i < count; i++) holeCardOrder[i] = i;
+            if (holeCardOrderMode == 0) return count;
+            for (int i = 1; i < count; i++)
+            {
+                int cardIndex = holeCardOrder[i], insertAt = i;
+                while (insertAt > 0 && CompareHoleCards(cards[cardIndex], cards[holeCardOrder[insertAt - 1]]) < 0)
+                {
+                    holeCardOrder[insertAt] = holeCardOrder[insertAt - 1];
+                    insertAt--;
+                }
+                holeCardOrder[insertAt] = cardIndex;
+            }
+            return count;
+        }
+        int CompareHoleCards(CardView left, CardView right)
+        {
+            if (left == null) return right == null ? 0 : 1;
+            if (right == null) return -1;
+            if (holeCardOrderMode == 1)
+            {
+                int rankOrder = right.rank.CompareTo(left.rank);
+                return rankOrder != 0 ? rankOrder : left.suit.CompareTo(right.suit);
+            }
+            int suitOrder = left.suit.CompareTo(right.suit);
+            return suitOrder != 0 ? suitOrder : right.rank.CompareTo(left.rank);
         }
         float InitialDuration(TableState state) { return state.players.Count(p => p.inHand) * 5 * CardDealSeconds; }
         void Update()
@@ -343,6 +374,9 @@ namespace Drawmaha
             accentButton.onFocused.background = accentNormal;
             accentButton.onNormal.textColor = Ink; accentButton.onHover.textColor = Color.white;
             accentButton.onActive.textColor = Color.white; accentButton.onFocused.textColor = Ink;
+            holeOrderTabButton = new GUIStyle(button);
+            holeOrderTabButton.fontSize = FitButtonFontSize(holeOrderTabButton, "Hole Card Order", 154);
+            holeOrderTabAccentButton = new GUIStyle(accentButton) { fontSize = holeOrderTabButton.fontSize };
             input = new GUIStyle(GUI.skin.textField); input.fontSize = 19; input.padding = new RectOffset(12, 12, 10, 8);
             betAmountStyle = new GUIStyle(input); betAmountStyle.fontSize = 27; betAmountStyle.alignment = TextAnchor.MiddleCenter;
             betSliderStyle = new GUIStyle(GUI.skin.horizontalSlider);
@@ -354,6 +388,13 @@ namespace Drawmaha
             betSliderThumbStyle.normal.background = betSliderThumb;
             betSliderThumbStyle.hover.background = betSliderThumb;
             betSliderThumbStyle.active.background = betSliderThumb;
+        }
+        int FitButtonFontSize(GUIStyle style, string value, float width)
+        {
+            GUIStyle measuredStyle = new GUIStyle(style);
+            while (measuredStyle.fontSize > 10 && measuredStyle.CalcSize(new GUIContent(value)).x > width)
+                measuredStyle.fontSize--;
+            return measuredStyle.fontSize;
         }
         void Fill(Rect rect, Color color, Texture2D texture = null)
         {
@@ -401,15 +442,18 @@ namespace Drawmaha
         }
         void Menu(TableState currentTable)
         {
-            Fill(new Rect(24, 90, 270, 250), Panel, rounded);
+            bool atTable = currentTable != null && currentTable.yourSeat >= 0
+                && currentTable.yourSeat < currentTable.players.Length;
+            Fill(new Rect(24, 90, 270, atTable ? 250 : 138), Panel, rounded);
             if (Button(new Rect(38, 102, 242, 48), "Customization")) { showSettings = true; showMenu = false; }
             if (Button(new Rect(38, 158, 242, 48), "Rules")) { showRules = true; showMenu = false; }
-            if (Button(new Rect(38, 214, 242, 48), "History", currentTable != null)) { showHistory = true; showMenu = false; }
-            bool canLeaveTable = network.Connected && currentTable != null && currentTable.yourSeat >= 0
-                && !currentTable.players[currentTable.yourSeat].leaving;
-            if (Button(new Rect(38, 270, 242, 48), "Leave Table", canLeaveTable))
+            if (atTable)
             {
-                network.Send(new Command { type = "leave" }); showMenu = false;
+                if (Button(new Rect(38, 214, 242, 48), "History")) { showHistory = true; showMenu = false; }
+                if (Button(new Rect(38, 270, 242, 48), "Leave Table"))
+                {
+                    network.Send(new Command { type = "leave" }); showMenu = false;
+                }
             }
         }
         void RebuyDialog(TableState state)
@@ -524,19 +568,22 @@ namespace Drawmaha
             int visible = Math.Min(p.count, Mathf.Clamp((steps - ordinal + order.Length - 1) / Math.Max(1, order.Length), 0, 5));
             bool previewReveal = previewTable != null && (actual == 2 || actual == 4);
             bool reveal = own || previewReveal || (t.showdown && shownBoard == t.board.Length);
+            int orderedCardCount = BuildHoleCardOrder(p.cards);
             float width = own ? 72 : 60, height = own ? 102 : 84, gap = width * 0.40f;
             int layoutCount = Mathf.Clamp(p.count, 1, 5); float middle = (layoutCount - 1) * 0.5f;
             float cardTop = center.y - height + 12;
             Rect[] rects = new Rect[visible]; float[] angles = new float[visible];
             for (int i = 0; i < visible; i++)
             {
-                float lift = own && selected[i] ? 18 : 0;
+                int cardIndex = i < orderedCardCount ? holeCardOrder[i] : i;
+                float lift = own && selected[cardIndex] ? 18 : 0;
                 Vector2 target = new Vector2(center.x - (gap * (layoutCount - 1) + width) / 2 + i * gap, cardTop - lift + Mathf.Abs(i - middle) * 1.25f);
                 float age = Time.unscaledTime - handStarted - (i * order.Length + ordinal) * CardDealSeconds;
                 Vector2 pos = Vector2.Lerp(new Vector2(915, 395), target, Mathf.SmoothStep(0, 1, Mathf.Clamp01(age / 0.2f)));
                 rects[i] = new Rect(pos.x, pos.y, width, height); angles[i] = (i - middle) * 2f;
                 Matrix4x4 saved = GUI.matrix; GUI.matrix = saved * RotationAtCanvasPivot(angles[i], new Vector2(pos.x + width / 2, pos.y + height));
-                Card(rects[i], reveal && p.cards != null && i < p.cards.Length ? p.cards[i] : null, own && selected[i]); GUI.matrix = saved;
+                Card(rects[i], reveal && p.cards != null && cardIndex < p.cards.Length ? p.cards[cardIndex] : null,
+                    own && selected[cardIndex]); GUI.matrix = saved;
             }
             DrawSeatPanel(p, box, acting);
             DrawDealerButton(t, actual, box);
@@ -565,8 +612,9 @@ namespace Drawmaha
                     Color old = GUI.color; GUI.color = Color.clear;
                     if (GUI.Button(rects[i], GUIContent.none))
                     {
-                        if (selected[i]) selected[i] = false;
-                        else if (selected.Count(s => s) < 2) selected[i] = true;
+                        int cardIndex = i < orderedCardCount ? holeCardOrder[i] : i;
+                        if (selected[cardIndex]) selected[cardIndex] = false;
+                        else if (selected.Count(s => s) < 2) selected[cardIndex] = true;
                     }
                     GUI.color = old; GUI.matrix = saved;
                 }
@@ -803,9 +851,10 @@ namespace Drawmaha
                 bool drawLocked = CurrentPreference(ref optimisticDrawLocked, own.drawLocked);
                 if (drawLocked)
                 {
-                    string lockedChoice = count == 0 ? "Stand pat is queued" : "Draw " + count + " is queued";
+                    int queuedCount = own.drawLocked ? own.queuedDrawCount : count;
+                    string lockedChoice = queuedCount == 0 ? "Stand pat is locked" : "Draw " + queuedCount + " is locked";
                     Label(1254, 901, 570, 45, lockedChoice, small);
-                    if (!acting && PreferenceButton(new Rect(1250, 966, 605, 52), count == 0 ? "Stand Pat" : "Draw " + count, true, preferenceEnabled, out nextDrawLocked))
+                    if (!acting && PreferenceButton(new Rect(1250, 966, 605, 52), queuedCount == 0 ? "Stand Pat" : "Draw " + queuedCount, true, preferenceEnabled, out nextDrawLocked))
                     {
                         optimisticDrawLocked = nextDrawLocked;
                         network.Send(new Command { type = "lockDraw", discards = Enumerable.Range(0, 5).Where(i => selected[i]).ToArray() });
@@ -817,8 +866,7 @@ namespace Drawmaha
                     Label(1254, 925, 580, 44, "Draw complete", small); return;
                 }
                 Label(1254, 901, 570, 45, acting ? "Select up to two cards above.  " + count + "/2 selected." : "Select discards now, then lock your choice.  " + count + "/2 selected.", small);
-                string drawLabel = count == 0 ? (acting ? "Stand pat" : "Queue Stand Pat")
-                    : acting ? "Draw " + count + " cards" : "Queue Draw " + count + " cards";
+                string drawLabel = count == 0 ? "Stand pat" : "Draw " + count + " cards";
                 bool drawPressed = acting
                     ? Button(new Rect(1250, 966, 605, 52), drawLabel, enabled, true)
                     : PreferenceButton(new Rect(1250, 966, 605, 52), drawLabel, false, preferenceEnabled, out nextDrawLocked);
@@ -841,10 +889,10 @@ namespace Drawmaha
                     : own.callQueued ? "Auto-call queued · waiting for your turn"
                     : animationsDone ? "Waiting for the other players…" : "Dealing cards…";
                 Label(1254, 901, 580, 44, waitingMessage, small);
-                if (t.actor != t.yourSeat && own.inHand && !own.folded && own.stack > 0 && IsBettingStage(t.stage))
+                if (t.actor != t.yourSeat && own.waitingToAct && own.inHand && !own.folded && own.stack > 0 && IsBettingStage(t.stage))
                 {
                     bool checkFold = CurrentPreference(ref optimisticCheckFold, own.checkFold);
-                    if (PreferenceButton(new Rect(1250, 966, 282, 56), "Check/Fold", checkFold, bettingPreferenceEnabled, out bool nextCheckFold))
+                    if (t.call == 0 && PreferenceButton(new Rect(1250, 966, 282, 56), "Check/Fold", checkFold, bettingPreferenceEnabled, out bool nextCheckFold))
                     {
                         optimisticCheckFold = nextCheckFold;
                         network.Send(new Command { type = "checkFold", enabled = nextCheckFold });
@@ -1002,12 +1050,83 @@ namespace Drawmaha
         void History()
         {
             Matrix4x4 oldMatrix = GUI.matrix;
-            GUI.matrix = oldMatrix * Matrix4x4.Translate(new Vector3(160, 40, 0));
             var state = CurrentTable;
-            Overlay("TABLE HISTORY"); var lines = state != null ? state.history : new string[0];
-            historyScroll = GUI.BeginScrollView(new Rect(394, 270, 811, 480), historyScroll, new Rect(0, 0, 777, Math.Max(460, lines.Length * 46)));
-            for (int i = 0; i < lines.Length; i++) Label(0, i * 46, 764, 44, lines[i], small);
-            GUI.EndScrollView(); if (Button(new Rect(964, 773, 241, 44), "Back to game", true, true)) showHistory = false;
+            Fill(new Rect(0, 0, W, H), new Color(0, 0, 0, 0.42f));
+            Rect panel = new Rect(32, 32, 573, 1016);
+            Event currentEvent = Event.current;
+            if (currentEvent.type == EventType.MouseDown && !panel.Contains(currentEvent.mousePosition))
+            {
+                showHistory = false;
+                currentEvent.Use();
+                GUI.matrix = oldMatrix;
+                return;
+            }
+            Fill(panel, Panel, rounded);
+            Fill(new Rect(panel.x, panel.y, 5, panel.height), Accent, white);
+            Label(panel.x + 24, panel.y + 18, panel.width - 92, 44, "HAND HISTORY", Style(28, Ink, FontStyle.Bold));
+            if (Button(new Rect(panel.xMax - 58, panel.y + 14, 40, 40), "X", true, true)) showHistory = false;
+            HandHistoryView[] hands = state?.handHistory ?? Array.Empty<HandHistoryView>();
+            Label(panel.x + 24, panel.y + 60, panel.width - 48, 24, hands.Length == 0 ? "No completed hands" : "Latest " + hands.Length + " hands", small);
+            Rect viewport = new Rect(panel.x + 16, panel.y + 96, panel.width - 32, panel.height - 170);
+            float contentHeight = 0;
+            foreach (HandHistoryView hand in hands)
+                contentHeight += 160 + (hand.players?.Length ?? 0) * 76 + 12;
+            historyScroll = GUI.BeginScrollView(viewport, historyScroll,
+                new Rect(0, 0, viewport.width - 18, Mathf.Max(viewport.height, contentHeight)));
+            float y = 0;
+            foreach (HandHistoryView hand in hands)
+            {
+                float entryHeight = 160 + (hand.players?.Length ?? 0) * 76;
+                if (y + entryHeight < historyScroll.y || y > historyScroll.y + viewport.height)
+                {
+                    y += entryHeight + 12;
+                    continue;
+                }
+                Rect entry = new Rect(0, y, viewport.width - 22, entryHeight);
+                Fill(entry, new Color(0.065f, 0.105f, 0.13f, 0.96f), rounded);
+                Label(entry.x + 12, entry.y + 8, entry.width - 24, 24,
+                    "HAND #" + hand.hand,
+                    Style(18, Ink, FontStyle.Bold));
+                const float cardWidth = 48, cardHeight = 68, cardGap = 4, cardColumnOffset = 158;
+                CardView[] board = hand.board ?? Array.Empty<CardView>();
+                float boardSpan = board.Length == 0 ? 0 : board.Length * cardWidth + (board.Length - 1) * cardGap;
+                float boardY = entry.y + 57;
+                Label(entry.x + 12, boardY, 142, cardHeight, "BOARD",
+                    Style(15, Dim, FontStyle.Bold, TextAnchor.MiddleLeft));
+                if (board.Length > 0)
+                    Fill(new Rect(entry.x + cardColumnOffset - 6, boardY - 4, boardSpan + 12, cardHeight + 10),
+                        new Color(0.08f, 0.34f, 0.52f, 0.72f), rounded);
+                for (int i = 0; i < board.Length; i++)
+                    DrawCardFace(new Rect(entry.x + cardColumnOffset + i * (cardWidth + cardGap), boardY,
+                        cardWidth, cardHeight), board[i], false, cardFaceStyle);
+                float playerY = entry.y + 132;
+                foreach (HandHistoryPlayerView player in hand.players ?? Array.Empty<HandHistoryPlayerView>())
+                {
+                    Rect avatar = new Rect(entry.x + 12, playerY + 13, 42, 42);
+                    Fill(new Rect(avatar.x - 2, avatar.y - 2, avatar.width + 4, avatar.height + 4),
+                        new Color(0.72f, 0.82f, 0.86f), round);
+                    Fill(avatar, AvatarColor(player.avatar), round);
+                    Label(avatar.x, avatar.y, avatar.width, avatar.height, AvatarInitials(player.username),
+                        Style(16, Color.white, FontStyle.Bold, TextAnchor.MiddleCenter));
+                    GUIStyle playerNameStyle = Style(16, Ink, FontStyle.Bold);
+                    playerNameStyle.wordWrap = false; playerNameStyle.clipping = TextClipping.Ellipsis;
+                    playerNameStyle.alignment = TextAnchor.MiddleLeft;
+                    Label(entry.x + 60, playerY + 8, 92, 25, player.username, playerNameStyle);
+                    string playerState = player.folded ? "Folded" : player.revealed ? "Revealed" : "Not revealed";
+                    Label(entry.x + 60, playerY + 34, 92, 22, playerState, Style(14, player.folded ? Dim : Accent));
+                    if (player.revealed && player.cards != null)
+                    {
+                        int orderedCardCount = BuildHoleCardOrder(player.cards);
+                        for (int i = 0; i < orderedCardCount; i++)
+                            DrawCardFace(new Rect(entry.x + cardColumnOffset + i * (cardWidth + cardGap), playerY + 1,
+                                cardWidth, cardHeight), player.cards[holeCardOrder[i]], false, cardFaceStyle);
+                    }
+                    playerY += 76;
+                }
+                y += entryHeight + 12;
+            }
+            GUI.EndScrollView();
+            if (Button(new Rect(panel.x + 18, panel.yMax - 58, panel.width - 36, 42), "Back to game", true, true)) showHistory = false;
             GUI.matrix = oldMatrix;
         }
         void Settings()
@@ -1015,12 +1134,22 @@ namespace Drawmaha
             Matrix4x4 oldMatrix = GUI.matrix;
             GUI.matrix = oldMatrix * Matrix4x4.Translate(new Vector3(160, 40, 0));
             Overlay("CUSTOMIZATION");
-            string[] tabs = { "Card Face", "Card Back", "Table", "Background" };
-            const float tabWidth = 194, tabGap = 8;
+            string[] tabs = { "Card Face", "Card Back", "Table", "Background", "Hole Card Order" };
+            const float tabWidth = 154, tabGap = 8;
             for (int i = 0; i < tabs.Length; i++)
             {
                 Rect tab = new Rect(394 + i * (tabWidth + tabGap), 258, tabWidth, 48);
-                if (Button(tab, tabs[i], true, customizationTab == i))
+                bool selectedTab = customizationTab == i;
+                bool clicked;
+                if (i == 4)
+                {
+                    bool wasEnabled = GUI.enabled;
+                    GUI.enabled = wasEnabled;
+                    clicked = GUI.Button(tab, tabs[i], selectedTab ? holeOrderTabAccentButton : holeOrderTabButton);
+                    GUI.enabled = wasEnabled;
+                }
+                else clicked = Button(tab, tabs[i], true, selectedTab);
+                if (clicked)
                 { customizationTab = i; customizationScroll = Vector2.zero; }
             }
             DrawCustomizationGrid();
@@ -1029,6 +1158,11 @@ namespace Drawmaha
         }
         void DrawCustomizationGrid()
         {
+            if (customizationTab == 4)
+            {
+                DrawHoleCardOrderSetting();
+                return;
+            }
             Texture2D[] options = customizationTab == 1 ? cardBacks : customizationTab == 2 ? pokerTables : backgrounds;
             int count = customizationTab == 0 ? 3 : options.Length;
             const float tileWidth = 250, tileHeight = 190, gapX = 14, gapY = 14;
@@ -1079,6 +1213,26 @@ namespace Drawmaha
                     { backgroundIndex = i; PlayerPrefs.SetString("drawmaha.background.asset", options[i].name); }
                     PlayerPrefs.Save();
                 }
+            }
+            GUI.EndScrollView();
+        }
+        void DrawHoleCardOrderSetting()
+        {
+            customizationScroll = GUI.BeginScrollView(new Rect(394, 318, 812, 430), customizationScroll,
+                new Rect(0, 0, 812, 430));
+            Label(20, 24, 772, 38, "HOLE CARD ORDER", Style(20, Ink, FontStyle.Bold));
+            string[] options = { "As dealt", "By rank", "By suit" };
+            string[] descriptions = { "Keep the dealt order", "Highest rank first; suit breaks ties", "Clubs to spades; highest rank first" };
+            for (int i = 0; i < options.Length; i++)
+            {
+                float x = 24 + i * 256;
+                if (Button(new Rect(x, 90, 232, 54), options[i], true, holeCardOrderMode == i))
+                {
+                    holeCardOrderMode = i;
+                    PlayerPrefs.SetInt("drawmaha.hole.card.order", i);
+                    PlayerPrefs.Save();
+                }
+                Label(x, 153, 232, 48, descriptions[i], Style(14, Dim, FontStyle.Normal, TextAnchor.UpperCenter));
             }
             GUI.EndScrollView();
         }

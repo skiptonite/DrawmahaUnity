@@ -31,9 +31,11 @@ public sealed class Room
     public readonly Session[] Seats = new Session[6];
     public readonly bool[] ReservedSeats = new bool[6];
     public readonly BlindOrbit Orbit = new();
+    public readonly List<HandHistoryView> CompletedHands = new();
     public long Revision;
     public DateTime Deadline, NextHand;
     public bool AnnouncedComplete;
+    public int ArchivedHandNumber = -1;
     public int BuyIn => Game.BigBlind * 100;
     public Room(string id, string name, int small, int big)
     {
@@ -54,7 +56,8 @@ public sealed class Room
             canRaise = own >= 0 && Game.CanRaise(own), showdown = Game.ShowdownReached,
             deadlineUnixMs = Game.Actor >= 0 ? new DateTimeOffset(Deadline, TimeSpan.Zero).ToUnixTimeMilliseconds() : 0,
             serverUnixMs = new DateTimeOffset(now, TimeSpan.Zero).ToUnixTimeMilliseconds(),
-            board = Game.Board.Select(ToCard).ToArray(), results = Game.Results.ToArray(), history = Game.Log.TakeLast(35).Reverse().ToArray(),
+            board = Game.Board.Select(ToCard).ToArray(), handHistory = CompletedHands.AsEnumerable().Reverse().ToArray(),
+            results = Game.Results.ToArray(), history = Game.Log.TakeLast(35).Reverse().ToArray(),
             players = Enumerable.Range(0, 6).Select(i =>
             {
                 Session s = Seats[i]; var p = Game.Players[i];
@@ -68,16 +71,18 @@ public sealed class Room
                     winner = Game.Stage == Street.Complete && p.Payout > 0, scoop = Game.Stage == Street.Complete && p.Scoop,
                     needsRebuy = needsRebuy,
                     drawLocked = Game.Stage == Street.Draw && s?.LockedDrawHand == Game.HandNumber,
+                    queuedDrawCount = i == own && s?.LockedDrawHand == Game.HandNumber ? s.LockedDiscards?.Length ?? 0 : 0,
                     checkFold = i == own && s?.CheckFold == true,
                     callQueued = i == own && s != null && s.AutoCallAmount > 0 && s.AutoCallAmount == (Game.IsBetting ? Game.ToCall(i) : 0),
                     callAmount = i == own && Game.IsBetting ? Game.ToCall(i) : 0,
+                    waitingToAct = i == own && Game.IsAwaitingAction(i),
                     entryMode = s?.Entry.ToString() ?? "", leaving = i == own && s?.Leaving == true,
                     status = s == null ? "Available" : s.Peer == null ? "Disconnected" : needsRebuy ? "Rebuy needed" : !p.InHand ? (s.Entry == EntryMode.PostBigBlind ? "Post next eligible hand" : s.Entry == EntryMode.WaitForBigBlind ? "Waiting for big blind" : "Ready for next hand") : p.Folded ? (p.Action == "Auto-fold" ? "Auto-fold" : "Folded") : p.Stack == 0 ? "All in" : p.Action
                 };
             }).ToArray()
         };
     }
-    static CardView ToCard(Card c) => new() { rank = c.Rank, suit = c.Suit };
+    internal static CardView ToCard(Card c) => new() { rank = c.Rank, suit = c.Suit };
 }
 
 // One lock serializes every mutation; socket writes happen through each peer's queue.
@@ -188,7 +193,7 @@ public sealed class Hub
                     else if (command.type == "checkFold")
                     {
                         Player player = room.Game.Players[s.Seat];
-                        if (!room.Game.IsBetting || !player.CanAct || command.hand != room.Game.HandNumber)
+                        if (!room.Game.IsAwaitingAction(s.Seat) || !player.CanAct || command.hand != room.Game.HandNumber)
                             throw new InvalidOperationException("Check/Fold can only be set while waiting for your betting turn.");
                         s.CheckFold = command.enabled;
                         if (command.enabled) s.AutoCallAmount = -1;
@@ -199,7 +204,7 @@ public sealed class Hub
                     {
                         Player player = room.Game.Players[s.Seat];
                         int callAmount = room.Game.IsBetting && player.CanAct ? room.Game.ToCall(s.Seat) : 0;
-                        if (!room.Game.IsBetting || !player.CanAct || command.hand != room.Game.HandNumber || callAmount <= 0 || command.callAmount != callAmount)
+                        if (!room.Game.IsAwaitingAction(s.Seat) || !player.CanAct || command.hand != room.Game.HandNumber || callAmount <= 0 || command.callAmount != callAmount)
                             throw new InvalidOperationException("Call amount changed or your turn has started.");
                         s.AutoCallAmount = command.enabled ? callAmount : -1;
                         if (command.enabled) s.CheckFold = false;
@@ -261,6 +266,7 @@ public sealed class Hub
         Room room = s.Room; if (room == null) return;
         room.ReservedSeats[s.Seat] = reserveSeat;
         room.Seats[s.Seat] = null; var p = room.Game.Players[s.Seat]; p.Stack = 0; p.Cards.Clear(); p.InHand = false;
+        if (!room.Seats.Any(seat => seat != null)) { room.CompletedHands.Clear(); room.ArchivedHandNumber = -1; }
         s.Room = null; s.Seat = -1; s.Leaving = s.LeaveRequested = false;
         s.CheckFold = false; s.AutoCallAmount = -1; s.LockedDrawHand = -1; s.LockedDiscards = null;
         s.Peer?.Send(new Envelope { type = "left" });
@@ -277,7 +283,40 @@ public sealed class Hub
     void AfterAction(Room room, DateTime now)
     {
         room.Deadline = now.AddSeconds(actionSeconds);
-        if (room.Game.Stage == Street.Complete && !room.AnnouncedComplete) { room.AnnouncedComplete = true; room.NextHand = now.AddSeconds(showdownSeconds); }
+        if (room.Game.Stage == Street.Complete)
+        {
+            ArchiveCompletedHand(room);
+            if (!room.AnnouncedComplete) { room.AnnouncedComplete = true; room.NextHand = now.AddSeconds(showdownSeconds); }
+        }
+    }
+    static void ArchiveCompletedHand(Room room)
+    {
+        Game game = room.Game;
+        if (game.Stage != Street.Complete || room.ArchivedHandNumber == game.HandNumber) return;
+        var archived = new HandHistoryView
+        {
+            hand = game.HandNumber,
+            showdown = game.ShowdownReached,
+            board = game.Board.Select(Room.ToCard).ToArray(),
+            players = Enumerable.Range(0, game.Players.Length)
+                .Where(seat => game.Players[seat].InHand)
+                .Select(seat =>
+                {
+                    Player player = game.Players[seat];
+                    bool revealed = game.ShowdownReached && !player.Folded;
+                    return new HandHistoryPlayerView
+                    {
+                        username = player.Name,
+                        avatar = room.Seats[seat]?.Avatar ?? 0,
+                        folded = player.Folded,
+                        revealed = revealed,
+                        cards = revealed ? player.Cards.Select(Room.ToCard).ToArray() : Array.Empty<CardView>()
+                    };
+                }).ToArray()
+        };
+        room.CompletedHands.Add(archived);
+        if (room.CompletedHands.Count > 20) room.CompletedHands.RemoveAt(0);
+        room.ArchivedHandNumber = game.HandNumber;
     }
     void ResolveLockedDraws(Room room, DateTime now)
     {

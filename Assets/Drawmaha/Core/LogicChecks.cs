@@ -60,6 +60,12 @@ namespace Drawmaha
         }
         static void BettingChecks()
         {
+            var pendingAction = new Game(16); pendingAction.StartHand();
+            int bettor = pendingAction.Actor;
+            pendingAction.RaiseTo(bettor, pendingAction.MinimumRaiseTo);
+            Check(!pendingAction.IsAwaitingAction(bettor), "Bettor is not awaiting another action while opponents respond");
+            Check(pendingAction.IsAwaitingAction(pendingAction.Actor), "Next player remains awaiting action after a bet");
+
             var g = new Game(17); g.StartHand();
             Check(g.Dealer == 0 && g.SmallBlindSeat == 1 && g.BigBlindSeat == 2 && g.Actor == 3, "Four-seat blind order");
             Check(g.MaximumRaiseTo(3) == 35 && g.MinimumRaiseTo == 20, "Initial pot-limit bounds");
