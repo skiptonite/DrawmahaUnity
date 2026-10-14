@@ -11,7 +11,7 @@ public sealed class CryptoRandom : Random
 }
 public sealed class Session
 {
-    public string Token, Name;
+    public string Token, Name, WalletId;
     public int Avatar, Seat = -1, DisconnectedHand, LockedDrawHand = -1, AutoCallAmount = -1;
     public int[] LockedDiscards;
     public Peer Peer;
@@ -89,14 +89,16 @@ public sealed class Room
 public sealed class Hub
 {
     readonly object gate = new();
+    readonly WalletStore wallets;
     public readonly Room[] Rooms = { new("micro", "The Green Room", 1, 2), new("standard", "Drawmaha Social", 5, 10), new("deep", "The High Table", 25, 50) };
     readonly Dictionary<string, Session> sessions = new();
     public readonly string Epoch = Guid.NewGuid().ToString("N");
     readonly string accessKey;
     readonly int actionSeconds, showdownSeconds, reconnectSeconds;
     int connections;
-    public Hub(string accessKey = null, int actionSeconds = 30, int showdownSeconds = 6, int reconnectSeconds = 90)
+    public Hub(WalletStore wallets, string accessKey = null, int actionSeconds = 30, int showdownSeconds = 6, int reconnectSeconds = 90)
     {
+        this.wallets = wallets;
         this.accessKey = accessKey ?? Environment.GetEnvironmentVariable("DRAWMAHA_ACCESS_KEY") ?? "";
         this.actionSeconds = Setting("DRAWMAHA_ACTION_SECONDS", actionSeconds, 2, 120);
         this.showdownSeconds = Setting("DRAWMAHA_SHOWDOWN_SECONDS", showdownSeconds, 1, 30);
@@ -111,23 +113,38 @@ public sealed class Hub
         lock (gate)
         {
             if (accessKey.Length > 0 && !CryptographicOperations.FixedTimeEquals(System.Text.Encoding.UTF8.GetBytes(accessKey), System.Text.Encoding.UTF8.GetBytes(hello.accessKey ?? ""))) throw new InvalidOperationException("Incorrect invite key.");
+            string name = (hello.username ?? "").Trim();
+            if (!Regex.IsMatch(name, @"^[a-zA-Z0-9][a-zA-Z0-9 _-]{1,19}$")) throw new ArgumentException("Display name: 2–20 letters, numbers, spaces, _ or -.");
+            if (!Guid.TryParseExact(hello.walletId, "N", out Guid parsedWalletId)) throw new ArgumentException("A valid guest wallet identity is required.");
+            string walletId = parsedWalletId.ToString("N");
+            int walletBalance = wallets.GetBalance(walletId);
             Session s;
             if (!string.IsNullOrEmpty(hello.token) && sessions.TryGetValue(hello.token, out s))
             {
+                if (s.WalletId != walletId) throw new InvalidOperationException("This reconnect token belongs to a different wallet.");
+                if (sessions.Values.Any(p => p != s && p.Name.Equals(name, StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException("That display name is in use.");
                 s.Peer?.Stop();
                 if (s.Room != null && !s.Room.Game.Players[s.Seat].InHand && (s.MissedBig || s.MissedSmall)) s.Entry = EntryMode.WaitForBigBlind;
             }
             else
             {
                 if (sessions.Count >= 128) throw new InvalidOperationException("Session capacity reached. Try again later.");
-                string name = (hello.username ?? "").Trim();
-                if (!Regex.IsMatch(name, @"^[a-zA-Z0-9][a-zA-Z0-9 _-]{1,19}$")) throw new ArgumentException("Username: 2–20 letters, numbers, spaces, _ or -.");
-                if (sessions.Values.Any(p => p.Name.Equals(name, StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException("That username is in use.");
-                s = new Session { Name = name, Token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)), Avatar = Math.Clamp(hello.avatar, 0, 7) };
+                if (sessions.Values.Any(p => p.Name.Equals(name, StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException("That display name is in use.");
+                s = new Session { Name = name, WalletId = walletId, Token = Convert.ToHexString(RandomNumberGenerator.GetBytes(32)), Avatar = Math.Clamp(hello.avatar, 0, 7) };
                 sessions.Add(s.Token, s);
             }
+            if (s.Name != name)
+            {
+                string previousName = s.Name;
+                s.Name = name;
+                if (s.Room != null)
+                {
+                    s.Room.Game.Players[s.Seat].Name = name;
+                    s.Room.Game.Note(previousName + " changed display name to " + name + ".");
+                }
+            }
             s.Peer = peer; s.LastSeen = DateTime.UtcNow; peer.Session = s;
-            peer.Send(new Envelope { type = "welcome", token = s.Token, epoch = Epoch, protocol = WireProtocol.Current });
+            peer.Send(new Envelope { type = "welcome", token = s.Token, epoch = Epoch, protocol = WireProtocol.Current, walletBalance = walletBalance });
             peer.Send(new Envelope { type = "lobby", tables = Rooms.Select(r => r.Lobby()).ToArray() });
             if (s.Room != null) Changed(s.Room, DateTime.UtcNow);
         }
@@ -166,7 +183,9 @@ public sealed class Hub
                     {
                         Player player = room.Game.Players[s.Seat];
                         if (player.Stack != 0 || (player.InHand && room.Game.Stage != Street.Complete)) throw new InvalidOperationException("Rebuy is available between hands.");
+                        wallets.Rebuy(s.WalletId, room.Id, room.BuyIn);
                         player.Stack = room.BuyIn; player.Action = "Rebuy";
+                        WalletChanged(s);
                         Changed(room, now); LobbyChanged();
                     }
                     else if (command.type == "lockDraw")
@@ -255,20 +274,25 @@ public sealed class Hub
         int seat = -1;
         for (int i = 0; i < room.Seats.Length; i++) if (room.Seats[i] == null && !room.ReservedSeats[i]) { seat = i; break; }
         if (seat < 0) throw new InvalidOperationException("Table is full.");
+        wallets.BuyIn(s.WalletId, room.Id, room.BuyIn);
         s.Room = room; s.Seat = seat; s.Entry = entry; s.Leaving = s.LeaveRequested = false; s.MissedBig = s.MissedSmall = false;
         s.CheckFold = false; s.AutoCallAmount = -1; s.LockedDrawHand = -1; s.LockedDiscards = null;
         room.Seats[seat] = s; var p = room.Game.Players[seat]; p.Name = s.Name; p.Stack = room.BuyIn; p.Bet = p.Contributed = p.DrawCount = p.Payout = 0; p.Folded = p.InHand = p.Scoop = false; p.Action = ""; p.Cards.Clear();
         room.Game.Note(s.Name + " joins seat " + (seat + 1) + (entry == EntryMode.PostBigBlind ? " · post big blind" : " · wait for big blind"));
+        WalletChanged(s);
         Changed(room, now); LobbyChanged();
     }
     void Remove(Session s, bool reserveSeat = false)
     {
         Room room = s.Room; if (room == null) return;
+        Player player = room.Game.Players[s.Seat];
+        int balance = wallets.CashOut(s.WalletId, room.Id, player.Stack);
         room.ReservedSeats[s.Seat] = reserveSeat;
-        room.Seats[s.Seat] = null; var p = room.Game.Players[s.Seat]; p.Stack = 0; p.Cards.Clear(); p.InHand = false;
+        room.Seats[s.Seat] = null; player.Stack = 0; player.Cards.Clear(); player.InHand = false;
         if (!room.Seats.Any(seat => seat != null)) { room.CompletedHands.Clear(); room.ArchivedHandNumber = -1; }
         s.Room = null; s.Seat = -1; s.Leaving = s.LeaveRequested = false;
         s.CheckFold = false; s.AutoCallAmount = -1; s.LockedDrawHand = -1; s.LockedDiscards = null;
+        s.Peer?.Send(new Envelope { type = "wallet", walletBalance = balance });
         s.Peer?.Send(new Envelope { type = "left" });
     }
     public void Disconnect(Peer peer)
@@ -285,9 +309,22 @@ public sealed class Hub
         room.Deadline = now.AddSeconds(actionSeconds);
         if (room.Game.Stage == Street.Complete)
         {
+            CheckpointStacks(room);
             ArchiveCompletedHand(room);
             if (!room.AnnouncedComplete) { room.AnnouncedComplete = true; room.NextHand = now.AddSeconds(showdownSeconds); }
         }
+    }
+    void CheckpointStacks(Room room)
+    {
+        for (int seat = 0; seat < room.Seats.Length; seat++)
+        {
+            Session session = room.Seats[seat];
+            if (session != null) wallets.CheckpointStack(session.WalletId, room.Id, room.Game.Players[seat].Stack);
+        }
+    }
+    void WalletChanged(Session session)
+    {
+        session.Peer?.Send(new Envelope { type = "wallet", walletBalance = wallets.GetBalance(session.WalletId) });
     }
     static void ArchiveCompletedHand(Room room)
     {

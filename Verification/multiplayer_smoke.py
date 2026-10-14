@@ -19,15 +19,17 @@ async def wait_for(predicate, timeout=15):
         while not predicate(): await asyncio.sleep(.025)
 
 class Client:
-    def __init__(self, name, token=None):
+    def __init__(self, name, token=None, wallet_id=None):
         self.name, self.token = name, token
+        self.wallet_id = wallet_id or uuid.uuid4().hex
+        self.wallet_balance = 0
         self.table = None
         self.rows = []
         self.messages = []
         self.fault = None
     async def connect(self, key=KEY):
         self.ws = await websockets.connect(URL)
-        await self.ws.send(json.dumps(dict(type='hello', username=self.name, token=self.token, avatar=2, accessKey=key)))
+        await self.ws.send(json.dumps(dict(type='hello', username=self.name, token=self.token, walletId=self.wallet_id, avatar=2, accessKey=key)))
         self.task = asyncio.create_task(self.reader())
         await wait_for(lambda: self.token or any(m['type']=='error' for m in self.messages))
         if key == KEY: await wait_for(lambda: len(self.rows)==3)
@@ -36,7 +38,8 @@ class Client:
         try:
             async for frame in self.ws:
                 m=json.loads(frame); self.messages.append(m)
-                if m['type']=='welcome': self.token=m['token']
+                if m['type']=='welcome': self.token=m['token']; self.wallet_balance=m['walletBalance']
+                if m['type']=='wallet': self.wallet_balance=m['walletBalance']
                 if m['type']=='lobby': self.rows=m['tables']
                 if m['type']=='left': self.table=None
                 if m['type']=='state':
@@ -104,8 +107,11 @@ async def main():
         check(any(m['type']=='error' and 'invite' in m['message'] for m in bad.messages),'Invite enforcement')
         await bad.close()
         for i in range(6): clients.append(await Client('Smoke'+str(i)).connect())
+        check(all(c.wallet_balance==10000 for c in clients),'New guest wallets receive the configured starting bank')
         check(all(r['maxSeats']==6 and r['available']==6 for r in clients[0].rows),'Empty lobby configuration')
         await clients[0].send('join',tableId='standard',entryMode='wait')
+        await wait_for(lambda:clients[0].wallet_balance==9000)
+        check(clients[0].wallet_balance==9000,'Joining debits the table buy-in from the bank')
         await asyncio.sleep(.35)
         waiting=clients[0].table
         check(waiting['stage']=='Waiting','One player cannot start')
@@ -124,6 +130,7 @@ async def main():
         outsider=await Client('Outsider').connect()
         r=await outsider.send('join',tableId='standard',entryMode='post')
         check(r['type']=='error' and 'full' in r['message'],'Seventh player rejected')
+        check(outsider.wallet_balance==10000,'Rejected full-table join does not debit the bank')
         await outsider.close()
         await wait_for(lambda:all(c.table and sum(p['occupied'] for p in c.table['players'])==6 for c in clients))
         t=clients[0].table
@@ -156,11 +163,12 @@ async def main():
         check(sum(p['stack'] for p in final['players'])==6000,'Multiplayer chips conserved with six full draws')
         await wait_for(lambda:all(c.table['stage']=='Complete' for c in clients))
         # Reconnect with an opaque token; same identity, seat and stack.
-        old=clients[4]; token=old.token; oldseat=old.table['yourSeat']
-        await old.close(); replacement=await Client('IgnoredName',token).connect(); clients[4]=replacement
+        old=clients[4]; token=old.token; wallet_id=old.wallet_id; oldseat=old.table['yourSeat']
+        await old.close(); replacement=await Client('IgnoredName',token,wallet_id).connect(); clients[4]=replacement
         await wait_for(lambda:replacement.table is not None)
         check(replacement.table['yourSeat']==oldseat,'Reconnect retains seat')
-        check(replacement.table['players'][oldseat]['username']=='Smoke4','Reconnect cannot change identity')
+        check(replacement.table['players'][oldseat]['username']=='IgnoredName','Reconnect can change the display name')
+        check(replacement.wallet_balance==9000,'Reconnect retains the same guest wallet')
         # Folded or completed players can leave immediately.
         async with asyncio.timeout(20):
             while True:
@@ -188,9 +196,11 @@ async def main():
         await wait_for(lambda:leaving.table and leaving.table['hand']==1)
         await queued.send('join',tableId='micro',entryMode='wait')
         await wait_for(lambda:queued.table and queued.table['players'][queued.table['yourSeat']]['occupied'])
+        await wait_for(lambda:queued.wallet_balance==9800)
         check(not queued.table['players'][queued.table['yourSeat']]['inHand'],'Queued player is not dealt into current hand')
         check((await queued.send('leave'))['type']=='ack','Queued player can leave immediately')
         await wait_for(lambda:queued.table is None)
+        check(queued.wallet_balance==10000,'Leaving before a hand cashes the full stack back into the bank')
         check(queued.table is None,'Queued seat is released immediately')
         check((await leaving.send('leave'))['type']=='ack','In-hand player can request deferred leave')
         await wait_for(lambda:leaving.table and leaving.table['players'][leaving.table['yourSeat']]['leaving'])
@@ -226,7 +236,7 @@ async def main():
                     else: await action([leaving,partner],'call')
         check(normal_action_completed,'Leave request preserves normal turn options')
         await wait_for(lambda:leaving.table is None)
-        await finish_hand([partner])
+        if partner.table['stage']!='Waiting': await finish_hand([partner])
         check(leaving.table is None,'In-hand player is removed after hand completion')
         check((await partner.send('leave'))['type']=='ack','Remaining player can leave completed table')
         await wait_for(lambda:partner.table is None)

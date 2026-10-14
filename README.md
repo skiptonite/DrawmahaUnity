@@ -15,8 +15,10 @@ Six human seats per table. No bots. The server shuffles, deals, validates action
    A development server permits an empty invite key. To require one, set `DRAWMAHA_ACCESS_KEY` before starting it. Production refuses to start without a key of at least 16 characters.
 3. In Unity, choose **Tools → Drawmaha → Open Table**, then press Play.
 4. On the connect screen, enter a username and invite code. The default server address is the deployed Azure server; after connecting, choose a table in the lobby. To test a local server, change the address to `ws://localhost:8080/ws`.
-5. Build a Windows client using **Tools → Drawmaha → Build Windows Client** and run a second instance with a **different username**. Saved reconnect identities are separate for each username/server combination.
+5. Build a Windows client using **Tools → Drawmaha → Build Windows Client**. For multiplayer testing, use a second machine; multiple instances from the same installation share its guest identity and reconnect session.
 6. With two seated, connected players, the first hand starts automatically. Later hands start six seconds after settlement. New arrivals wait for the next eligible hand.
+
+Each guest wallet starts with 10,000 play chips by default. The bank is tied to one locally saved guest identity per server and app installation; the display name can change without creating another wallet. Joining deducts the table buy-in; leaving returns the remaining stack. The bank is stored on the server, not in PlayerPrefs. Existing installations migrate the wallet for the display name entered at first connect after updating. There is no in-game reset option. Clearing saved client data or reinstalling may still create a new guest identity, so this is not a strong one-person/one-account guarantee.
 
 For a friend on another computer, build the matching client with **Tools → Drawmaha → Build Windows Client** or **Tools → Drawmaha → Build macOS Client**. For macOS, install **macOS Build Support** for this Unity Editor in Unity Hub first. The macOS build outputs `Builds/macOS/Drawmaha.app` and creates a ready-to-upload `Builds/Drawmaha-macOS.zip` with executable permissions preserved. Attach that ZIP to a GitHub Release. On first launch, macOS may warn that the app is from an unidentified developer; for a private test, Control-click the app, choose **Open**, then confirm. Your friend enters their own username and the invite code you share privately. The client defaults to the deployed Azure server. Remote connections require `wss://`; unencrypted `ws://` is allowed only for loopback testing. See [AZURE_SETUP.md](AZURE_SETUP.md) for server deployment and updates.
 
@@ -28,7 +30,7 @@ For a friend on another computer, build the matching client with **Tools → Dra
 | Drawmaha Social | 5 / 10 | 1,000 | 6 |
 | The High Table | 25 / 50 | 5,000 | 6 |
 
-All values are play chips. Buy-ins are fixed at 100 big blinds. Change the rows in `Server/Hub.cs`. Clients read the lobby configuration from the server.
+All values are play chips. Buy-ins are fixed at 100 big blinds and debited from the main bank. New guest wallets receive 10,000 chips by default; configure `DRAWMAHA_STARTING_BANK` on the server to change this. Change the table rows in `Server/Hub.cs`. Clients read the lobby configuration from the server.
 
 ## Gameplay retained
 
@@ -66,7 +68,7 @@ This uses a scaled IMGUI interface to preserve the original project's dependency
 
 The server uses .NET 10 and ordinary ASP.NET Core WebSockets. There is no game-host player; all table mutations occur on the server under one lock. Clients submit an action ID, hand number, and expected revision. Duplicate accepted commands do not apply twice; stale/out-of-turn/illegal commands are rejected. Reconnect restores current state without resending an unconfirmed action. Timers default to 30 seconds; timeout is check if free, fold when facing a bet, or stand pat during the draw. These deterministic fallbacks are not AI players.
 
-The small private-play server holds tables and sessions **in memory**. Restarting or redeploying it resets all tables, stacks, and sessions. Minimum one replica avoids deliberate scale-to-zero shutdowns, but it does **not** make state durable. Keep maximum replicas at one and use single revision mode; sticky sessions alone cannot make multiple independent table engines agree. Drain tables before deployments. Persistent accounts, player-uploaded avatars, wallets, cross-restart recovery, multi-replica routing, chat, tournaments and real-money operation are outside this version.
+The small private-play server holds tables and sessions **in memory**. Guest wallets and their chip ledger are stored in Azure Table Storage. At each completed hand, the server checkpoints each seated player's stack; after a restart it refunds the last checkpoint to the bank because the table itself cannot be recovered. Chips won or lost during an unfinished hand are rolled back to that checkpoint. Keep maximum replicas at one and use single revision mode; multiple independent table engines are not supported. Guest identities are local bearer IDs, not authenticated accounts, and can be lost with client data. Account recovery, multi-replica routing, chat, tournaments and real-money operation are outside this version.
 
 ## Checks
 

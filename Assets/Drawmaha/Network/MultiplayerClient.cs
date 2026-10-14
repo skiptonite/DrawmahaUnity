@@ -15,6 +15,7 @@ namespace Drawmaha.Network
         public bool Connected { get; private set; }
         public int ServerProtocol { get; private set; }
         public bool SupportsWaitingPreferences { get { return ServerProtocol >= WireProtocol.WaitingPreferences; } }
+        public bool SupportsMainBank { get { return ServerProtocol >= WireProtocol.MainBank; } }
         public string Status { get; private set; } = "Not connected";
         public TableState Table { get; private set; }
         public LobbyRow[] Tables { get; private set; } = new LobbyRow[0];
@@ -27,16 +28,29 @@ namespace Drawmaha.Network
         readonly SemaphoreSlim sendGate = new SemaphoreSlim(1, 1);
         ClientWebSocket socket;
         CancellationTokenSource cancel;
-        string username, accessKey, token, pendingId, epoch;
+        string username, accessKey, token, walletId, pendingId, epoch;
         int avatar, generation;
         float heartbeat, pendingAt;
         bool wantConnection, connectInProgress;
         float reconnectAt;
-        string TokenKey { get { return "drawmaha.token." + Endpoint + "." + (username ?? "").ToLowerInvariant(); } }
+        public int BankBalance { get; private set; }
+        string TokenKey { get { return "drawmaha.token." + Endpoint; } }
+        string WalletKey { get { return "drawmaha.wallet.id." + Endpoint; } }
+        string LegacyTokenKey { get { return TokenKey + "." + (username ?? "").ToLowerInvariant(); } }
+        string LegacyWalletKey { get { return WalletKey + "." + (username ?? "").ToLowerInvariant(); } }
         public void Connect(string endpoint, string name, int avatarIndex, string invite)
         {
             Disconnect(); ServerProtocol = 0; Table = null; Tables = new LobbyRow[0]; Endpoint = endpoint.Trim(); username = name.Trim(); avatar = avatarIndex; accessKey = invite;
-            token = PlayerPrefs.GetString(TokenKey, ""); wantConnection = true; BeginConnect();
+            token = PlayerPrefs.GetString(TokenKey, "");
+            walletId = PlayerPrefs.GetString(WalletKey, "");
+            if (!Guid.TryParseExact(walletId, "N", out _))
+            {
+                walletId = PlayerPrefs.GetString(LegacyWalletKey, "");
+                if (!Guid.TryParseExact(walletId, "N", out _)) walletId = Guid.NewGuid().ToString("N");
+            }
+            if (string.IsNullOrEmpty(token)) token = PlayerPrefs.GetString(LegacyTokenKey, "");
+            PlayerPrefs.SetString(WalletKey, walletId); PlayerPrefs.Save();
+            BankBalance = 0; wantConnection = true; BeginConnect();
         }
         void BeginConnect()
         {
@@ -47,7 +61,7 @@ namespace Drawmaha.Network
             connectInProgress = true; Status = "Connecting…";
             cancel?.Dispose(); cancel = new CancellationTokenSource(); socket = new ClientWebSocket(); socket.Options.KeepAliveInterval = TimeSpan.FromSeconds(20);
             int run = ++generation;
-            string hello = JsonUtility.ToJson(new Command { type = "hello", username = username, avatar = avatar, accessKey = accessKey, token = token });
+            string hello = JsonUtility.ToJson(new Command { type = "hello", username = username, avatar = avatar, accessKey = accessKey, token = token, walletId = walletId });
             _ = ConnectionLoop(socket, cancel.Token, run, hello);
         }
         async Task ConnectionLoop(ClientWebSocket peer, CancellationToken ct, int run, string hello)
@@ -96,12 +110,14 @@ namespace Drawmaha.Network
                     if (packet.type == "welcome")
                     {
                         bool changed = epoch != null && epoch != packet.epoch;
-                        epoch = packet.epoch; token = packet.token; ServerProtocol = packet.protocol; PlayerPrefs.SetString(TokenKey, token); PlayerPrefs.Save();
+                        epoch = packet.epoch; token = packet.token; ServerProtocol = packet.protocol; BankBalance = packet.walletBalance;
+                        PlayerPrefs.SetString(TokenKey, token); PlayerPrefs.DeleteKey(LegacyTokenKey); PlayerPrefs.DeleteKey(LegacyWalletKey); PlayerPrefs.Save();
                         Connected = true; connectInProgress = false;
-                        Status = !SupportsWaitingPreferences ? "Server update required for waiting-action preferences." : changed ? "Server restarted. Tables were reset." : "Connected";
+                        Status = !SupportsWaitingPreferences ? "Server update required for waiting-action preferences." : !SupportsMainBank ? "Server update required for the main bank." : changed ? "Server restarted. Tables were reset." : "Connected";
                         if (changed) Table = null;
                         heartbeat = Time.unscaledTime + 15;
                     }
+                    else if (packet.type == "wallet") BankBalance = packet.walletBalance;
                     else if (packet.type == "lobby") Tables = packet.tables ?? new LobbyRow[0];
                     else if (packet.type == "state") { Table = packet.table; StateReceivedAt = Time.unscaledTime; StateChanged?.Invoke(Table); }
                     else if (packet.type == "left") { Table = null; pendingId = null; }
@@ -153,12 +169,6 @@ namespace Drawmaha.Network
             }
             catch (Exception e) when (e is WebSocketException || e is OperationCanceledException || e is ObjectDisposedException) { if (run == generation) notices.Enqueue("Disconnected. Reconnecting…"); }
             finally { if (acquired) sendGate.Release(); }
-        }
-        public void ForgetSession(string endpoint = null, string name = null)
-        {
-            if (endpoint != null) Endpoint = endpoint.Trim();
-            if (name != null) username = name.Trim();
-            PlayerPrefs.DeleteKey(TokenKey); token = ""; Table = null; Disconnect();
         }
         public void Disconnect()
         {

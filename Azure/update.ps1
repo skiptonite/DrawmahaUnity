@@ -59,7 +59,8 @@ try {
     finally { Remove-Item -LiteralPath $buildContext -Recurse -Force -ErrorAction SilentlyContinue }
 
     Write-Host ''
-    Write-Host "This update restarts '$AppName' and clears all in-memory tables, chips, and reconnect sessions."
+    Write-Host "This update restarts '$AppName' and clears in-memory tables and reconnect sessions."
+    Write-Host 'The last completed-hand table stacks are checkpointed to wallets; any unfinished hand is rolled back.'
     Write-Host 'Make sure every table is empty before continuing.'
     if ((Read-Host 'Type EMPTY to deploy') -cne 'EMPTY') { throw 'Deployment cancelled. The running app was not updated.' }
 
@@ -74,7 +75,7 @@ try {
     for ($attempt = 1; $attempt -le $HealthCheckAttempts; $attempt++) {
         try {
             $health = Invoke-RestMethod -Uri $healthUrl -Method Get -TimeoutSec 10
-            if ($health.status -eq 'ok' -and $health.protocol -eq 6) { $healthy = $true; break }
+            if ($health.status -eq 'ok' -and $health.protocol -eq 7) { $healthy = $true; break }
             $lastHealthError = "Unexpected health response: $($health | ConvertTo-Json -Compress)"
         }
         catch { $lastHealthError = $_.Exception.Message }

@@ -4,13 +4,14 @@ namespace Drawmaha.Network
 {
     public static class WireProtocol
     {
-        public const int Current = 6;
+        public const int Current = 7;
         public const int WaitingPreferences = 5;
+        public const int MainBank = 7;
     }
 
     [Serializable] public class Command
     {
-        public string type, username, token, accessKey, tableId, entryMode, id;
+        public string type, username, token, walletId, accessKey, tableId, entryMode, id;
         public int avatar, raiseTo, hand;
         public long revision;
         public bool enabled;
@@ -20,7 +21,7 @@ namespace Drawmaha.Network
     [Serializable] public class Envelope
     {
         public string type, message, token, epoch, id;
-        public int protocol;
+        public int protocol, walletBalance;
         public LobbyRow[] tables;
         public TableState table;
     }

@@ -16,10 +16,11 @@ This is a practical low-complexity starting point for a small private group. The
 | External HTTP ingress | Secure WebSocket endpoint | Target port **8080**, HTTP transport, HTTPS/TLS required; public 443 |
 | Azure Container Registry | Private image storage and remote Docker builds | Basic SKU; globally unique registry name |
 | User-assigned managed identity + `AcrPull` role | Pull the container without registry passwords | Scope role to that registry |
+| Azure Storage account + Table Storage | Durable guest wallets and transfer ledger | Standard general-purpose v2, Standard LRS; app identity gets `Storage Table Data Contributor` |
 | Container App secret `invite-key` | Restrict access to your private group | 16+ characters; reference as `DRAWMAHA_ACCESS_KEY` |
 | Cost Management budget | Spending visibility | Set an alert suitable for your budget; this is an alert, not a hard stop |
 
-The included script disables central log collection to avoid another recurring service. Live console logs remain available for debugging. Add a Log Analytics workspace later if persistent operational logs are useful. Do not enable frame/body logging: it would capture credentials and private cards.
+The included script disables central log collection to avoid another recurring service. Live console logs remain available for debugging. Add a Log Analytics workspace later if persistent operational logs are useful. Do not enable frame/body logging: it would capture credentials and private cards. The wallet table uses the app's managed identity; no storage key is saved in the app.
 
 Azure's HTTP ingress already supports WebSockets and TLS. You do not need to purchase a domain or certificate; use the assigned `azurecontainerapps.io` hostname. If you later use built-in Azure authentication, the Unity transport also needs an identity/token flow; this version uses a private invite key and resumable guest tokens instead.
 
@@ -29,7 +30,7 @@ Container Apps Consumption bills allocated CPU/memory duration and requests. Its
 
 Keep **min = max = 1** for this in-memory version. The replica may qualify for lower idle rates when unused, but WebSocket activity and processing can cause active billing. It is intentionally not configured to scale to zero because that discards running tables. A minimum replica does not prevent crashes, maintenance, or restart-related resets.
 
-Budget for the Container App **plus** Basic registry storage, image-build charges, and outbound data. Persisted logs would add costs if enabled. Prices vary by region, currency, and usage; check the [Azure pricing calculator](https://azure.microsoft.com/en-us/pricing/calculator/) with your region before creating resources. An existing external container registry can replace ACR if you want to avoid an additional Azure registry bill; the included path uses ACR for simpler Azure builds and managed-identity pulls. Do not enable a Dedicated workload profile for this small deployment.
+Budget for the Container App **plus** Basic registry storage, the Storage account, image-build charges, and outbound data. Table Storage is billed mainly by stored GB and transactions; this wallet workload should be small, but it is not a free tier. Persisted logs would add costs if enabled. Prices vary by region, currency, and usage; check the [Azure pricing calculator](https://azure.microsoft.com/en-us/pricing/calculator/) with your region before creating resources. An existing external container registry can replace ACR if you want to avoid an additional Azure registry bill; the included path uses ACR for simpler Azure builds and managed-identity pulls. Do not enable a Dedicated workload profile for this small deployment.
 
 ## Deploy from Windows PowerShell
 
@@ -41,12 +42,22 @@ Budget for the Container App **plus** Basic registry storage, image-build charge
    .\Azure\deploy.ps1 -RegistryName skipdrawmaha2026 -ResourceGroupName drawmaha-rg -Location centralus
    ```
 
-   Replace the registry example with your own available name. The script prompts securely for an invite key; it creates billable resources only when **you run it**. It builds the image remotely with `az acr build`; Docker Desktop is not required for that route. If your subscription does not allow ACR Tasks/builds, build `Server/Dockerfile` locally with Docker, tag it for your registry, and push it instead.
-4. The script prints a `wss://<hostname>/ws` client address and `https://<hostname>/health` health URL. Check that health returns `{"status":"ok","protocol":6}`.
-5. Configure the generated `wss://` address as the client's default endpoint in `Assets/Drawmaha/Runtime/TableView.cs`, then build and distribute the client. Players enter the invite key and different usernames on the connect screen; the lobby appears after connecting. The endpoint is no longer loaded from PlayerPrefs, so the configured build default is always used. The invite is not saved in the distributed game or PlayerPrefs; reconnect tokens are saved locally per username/server.
+   Replace the registry example with your own available name. The script prompts securely for an invite key; it creates billable resources only when **you run it**. It also creates a uniquely named wallet Storage account automatically. To choose its globally unique name, pass `-StorageAccountName <3-24-lowercase-letters-or-digits>`. It builds the image remotely with `az acr build`; Docker Desktop is not required for that route. If your subscription does not allow ACR Tasks/builds, build `Server/Dockerfile` locally with Docker, tag it for your registry, and push it instead.
+4. The script prints a `wss://<hostname>/ws` client address and `https://<hostname>/health` health URL. Check that health returns `{"status":"ok","protocol":7}`.
+5. Configure the generated `wss://` address as the client's default endpoint in `Assets/Drawmaha/Runtime/TableView.cs`, then build and distribute the client. Players enter the invite key and a display name on the connect screen; the lobby appears after connecting. Each installation keeps one guest identity per server, and changing the display name keeps the same wallet. The endpoint is no longer loaded from PlayerPrefs, so the configured build default is always used. The invite is not saved in the distributed game or PlayerPrefs; guest identity and reconnect token are saved locally per server.
 6. Verify the Azure portal shows Consumption, min/max 1, single revision, target port 8080, and insecure ingress disabled. Set your budget alert.
 
-Azure role assignments can take time to propagate. If the image pull fails immediately after creating `AcrPull`, verify the role scope and managed identity, wait for propagation, and retry the Container App creation. The script stops on errors and refuses to replace an already-running app.
+   Azure role assignments can take time to propagate. If the image pull or Table Storage access fails immediately after role assignment, verify the role scopes and managed identity, wait for propagation, and retry. The script stops on errors and refuses to replace an already-running app.
+
+### Existing Azure deployment
+
+For an app deployed before wallet storage was added, create the table and grant/configure the existing `$AppName-pull` identity with:
+
+```powershell
+.\Azure\setup-wallet-storage.ps1 -StorageAccountName <globally-unique-name> -ResourceGroupName drawmaha-rg -AppName drawmaha -ConfigureApp
+```
+
+This creates the account/table, grants `Storage Table Data Contributor`, and adds the endpoint and managed-identity client ID to the Container App. Then deploy the updated image with `Azure/update.ps1`. The setup command requires permission to create storage resources and assign the role. Do not manually add an account key to app settings.
 
 ## Runtime settings
 
@@ -56,11 +67,14 @@ Azure role assignments can take time to propagate. If the image pull fails immed
 | `DRAWMAHA_ACTION_SECONDS` | 30 | Time to act; server clamps to 2–120 seconds |
 | `DRAWMAHA_SHOWDOWN_SECONDS` | 6 | Delay before next hand; 1–30 seconds |
 | `DRAWMAHA_RECONNECT_SECONDS` | 90 | Seat reservation while offline; 2–600 seconds |
+| `DRAWMAHA_TABLES_ENDPOINT` | Required in Production | Table service endpoint, e.g. `https://<account>.table.core.windows.net` |
+| `DRAWMAHA_STARTING_BANK` | 10000 | Play-chip grant when a guest wallet is first created |
+| `AZURE_CLIENT_ID` | Managed identity default | Client ID of the user-assigned identity allowed to access the wallet table |
 | `ASPNETCORE_HTTP_PORTS` | 8080 in container | Backend listener |
 
 ## Updates, restart, and scaling
 
-**All game/session state is currently in memory.** Restarting or deploying a new image resets tables, buy-ins, and reconnect identities. There is no durable wallet/account database. The client recognizes a new server epoch and returns to the lobby. Drain tables and announce a maintenance window before upgrades.
+**Tables and reconnect sessions remain in memory; guest wallets and transfer records are durable in Table Storage.** Each completed hand checkpoints seated stacks. After restart, the server returns the last checkpointed stack to each wallet; an unfinished hand is rolled back. The client recognizes a new server epoch and returns to the lobby. Drain tables and announce a maintenance window before upgrades.
 
 After all tables are empty, run the updater from the project root. It builds a uniquely tagged image, asks you to type `EMPTY` before restarting the app, then checks the health endpoint. It requires an Azure CLI login and the existing registry/app names:
 
@@ -74,7 +88,7 @@ Do not turn on multiple replicas or multiple live revisions. Two processes would
 
 ## Validation boundary
 
-The server was built and tested locally using multiple real WebSocket connections. Azure resources have **not** been provisioned, the deployment script has not been executed against a subscription, and the Docker image has not been run here. Unity Editor rendering/builds still need verification on your computer.
+The server was built and tested locally using multiple real WebSocket connections and in-memory Development wallets. Azure resources have **not** been provisioned, the deployment scripts have not been executed against a subscription, and the Docker image has not been run here. Unity Editor rendering/builds still need verification on your computer.
 
 ## Official references checked
 

@@ -33,7 +33,7 @@ namespace Drawmaha
         GUIStyle text, small, bold, title, button, accentButton, holeOrderTabButton, holeOrderTabAccentButton, input, betAmountStyle, betSliderStyle, betSliderThumbStyle;
         const string LocalhostEndpoint = "ws://127.0.0.1:8080/ws";
         const string AzureEndpoint = "wss://drawmaha.blackmushroom-85b81292.centralus.azurecontainerapps.io/ws";
-        string endpoint = LocalhostEndpoint, username = "", invite = "", error = "", lastTable = "";
+        string endpoint = AzureEndpoint, username = "", invite = "", error = "", lastTable = "";
         bool post, showMenu, showHistory, showRules, showSettings;
         bool? optimisticDrawLocked, optimisticCheckFold, optimisticCallQueued;
         int optimisticCallAmount = -1;
@@ -464,14 +464,22 @@ namespace Drawmaha
             Label(700, 483, 520, 42, "Rebuy for " + (state.bigBlind * 100).ToString("N0") + " chips?",
                 Style(21, Dim, FontStyle.Normal, TextAnchor.MiddleCenter));
             bool connected = network.Connected;
-            bool canRebuy = connected && !network.CommandPending;
+            bool canRebuy = connected && !network.CommandPending && network.BankBalance >= state.bigBlind * 100;
             if (Button(new Rect(700, 555, 250, 58), "Leave Table", connected)) network.Send(new Command { type = "leave" });
             if (Button(new Rect(970, 555, 250, 58), "Rebuy", canRebuy, true)) network.Send(new Command { type = "rebuy" });
+            Label(700, 526, 520, 26, "Main bank: " + network.BankBalance.ToString("N0") + " chips", small);
         }
         void Lobby()
         {
             Matrix4x4 oldMatrix = GUI.matrix;
             GUI.matrix = oldMatrix * Matrix4x4.Translate(new Vector3(160, 40, 0));
+            Rect bankBox = new Rect(485, 0, 630, 112);
+            Fill(bankBox, Panel, rounded);
+            Fill(new Rect(bankBox.x, bankBox.y, 5, bankBox.height), Accent, white);
+            Fill(new Rect(bankBox.x + 22, bankBox.y + 25, 62, 62), Color.white, pokerChip);
+            Label(bankBox.x + 104, bankBox.y + 12, 490, 28, "MAIN BANK", small);
+            Label(bankBox.x + 104, bankBox.y + 38, 490, 58, network.BankBalance.ToString("N0"),
+                Style(38, Ink, FontStyle.Bold, TextAnchor.MiddleLeft));
             Fill(new Rect(250, 159, 1100, 751), Panel); Label(286, 187, 600, 45, "TAKE A SEAT", title);
             Label(286, 239, 960, 38, "Six seats per table. Hands begin automatically with two players.", small);
             Label(286, 294, 720, 28, "Entry preference:", small);
@@ -486,7 +494,7 @@ namespace Drawmaha
                 Fill(new Rect(276, y, 1044, 70), new Color(0.075f, 0.12f, 0.15f));
                 Label(294, y + 20, 335, 35, row.name, bold); Label(649, y + 22, 160, 32, row.smallBlind + " / " + row.bigBlind);
                 Label(834, y + 22, 170, 32, row.buyIn.ToString("N0")); Label(1020, y + 22, 145, 32, row.occupied + " / " + row.maxSeats);
-                if (Button(new Rect(1180, y + 13, 121, 43), "Join", network.Connected && row.available > 0 && !network.CommandPending, true))
+                if (Button(new Rect(1180, y + 13, 121, 43), "Join", network.Connected && row.available > 0 && network.BankBalance >= row.buyIn && !network.CommandPending, true))
                     network.Send(new Command { type = "join", tableId = row.id, entryMode = post ? "post" : "wait" });
             }
             if (rows.Length == 0) Label(286, 456, 1000, 80, "No tables are available right now.", small);
@@ -500,7 +508,7 @@ namespace Drawmaha
             Fill(new Rect(250, 159, 1100, 751), Panel);
             Label(286, 187, 600, 45, "WELCOME TO DRAWMAHA", title);
             Label(286, 239, 960, 38, "Enter your player details to find an open table.", small);
-            Label(286, 321, 285, 26, "Username", small);
+            Label(286, 321, 285, 26, "Display name", small);
             username = GUI.TextField(new Rect(286, 354, 520, 47), username, 20, input);
             Label(286, 428, 285, 26, "Invite code", small);
             invite = GUI.PasswordField(new Rect(286, 461, 520, 47), invite, '*', 128, input);
@@ -512,7 +520,6 @@ namespace Drawmaha
                 PlayerPrefs.Save();
                 network.Connect(endpoint, username, avatarIndex, invite);
             }
-            if (Button(new Rect(1050, 522, 262, 33), "Forget saved identity", !connecting)) network.ForgetSession(endpoint, username);
             Label(286, 861, 900, 30, "Your invite code is used to join your private game server.", Style(14, Dim));
             GUI.matrix = oldMatrix;
         }

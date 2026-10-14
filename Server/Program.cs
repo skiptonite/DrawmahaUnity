@@ -7,6 +7,7 @@ using Drawmaha.Network;
 
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(o => o.Limits.MaxRequestBodySize = 8192);
+builder.Services.AddSingleton<WalletStore>();
 builder.Services.AddSingleton<Hub>();
 builder.Services.AddHostedService<TableTicker>();
 var app = builder.Build();

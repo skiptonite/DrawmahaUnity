@@ -3,6 +3,8 @@ param(
     [Parameter(Mandatory = $true)]
     [ValidatePattern('^[a-z0-9]{5,50}$')]
     [string]$RegistryName,
+    [ValidatePattern('^[a-z0-9]{3,24}$')]
+    [string]$StorageAccountName,
     [string]$ResourceGroupName = 'drawmaha-rg',
     [string]$Location = 'centralus',
     [string]$AppName = 'drawmaha',
@@ -34,6 +36,7 @@ try {
     Invoke-Azure -Arguments @('provider', 'register', '--namespace', 'Microsoft.App', '--wait', '--output', 'none')
     Invoke-Azure -Arguments @('provider', 'register', '--namespace', 'Microsoft.ContainerRegistry', '--wait', '--output', 'none')
     Invoke-Azure -Arguments @('provider', 'register', '--namespace', 'Microsoft.ManagedIdentity', '--wait', '--output', 'none')
+    Invoke-Azure -Arguments @('provider', 'register', '--namespace', 'Microsoft.Storage', '--wait', '--output', 'none')
     Invoke-Azure -Arguments @('group', 'create', '--name', $ResourceGroupName, '--location', $Location, '--output', 'none')
     # Refuse to redeploy an existing game; it may have live, in-memory tables.
     $existingAppNames = Invoke-Azure -Arguments @('containerapp', 'list', '--resource-group', $ResourceGroupName, '--query', '[].name', '--output', 'tsv')
@@ -51,10 +54,15 @@ try {
     }
     $identityId = Invoke-Azure -Arguments @('identity', 'show', '-n', $identityName, '-g', $ResourceGroupName, '--query', 'id', '-o', 'tsv')
     $principalId = Invoke-Azure -Arguments @('identity', 'show', '-n', $identityName, '-g', $ResourceGroupName, '--query', 'principalId', '-o', 'tsv')
+    $identityClientId = Invoke-Azure -Arguments @('identity', 'show', '-n', $identityName, '-g', $ResourceGroupName, '--query', 'clientId', '-o', 'tsv')
     $pullAssignments = Invoke-Azure -Arguments @('role', 'assignment', 'list', '--scope', $registryId, '--query', "[?principalId=='$principalId' && roleDefinitionName=='AcrPull'].id", '--output', 'tsv')
     if (-not $pullAssignments) {
         Invoke-Azure -Arguments @('role', 'assignment', 'create', '--assignee-object-id', $principalId, '--assignee-principal-type', 'ServicePrincipal', '--role', 'AcrPull', '--scope', $registryId, '--output', 'none')
     }
+    if ([string]::IsNullOrWhiteSpace($StorageAccountName)) { $StorageAccountName = 'drawmaha' + [Guid]::NewGuid().ToString('N').Substring(0, 8) }
+    $walletEndpointOutput = & (Join-Path $PSScriptRoot 'setup-wallet-storage.ps1') -StorageAccountName $StorageAccountName -ResourceGroupName $ResourceGroupName -Location $Location -IdentityPrincipalId $principalId
+    $walletEndpoint = ($walletEndpointOutput | Select-Object -Last 1).ToString().Trim()
+    if ([string]::IsNullOrWhiteSpace($walletEndpoint)) { throw 'Wallet storage setup did not return a Table endpoint.' }
     $tag = (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss')
     $buildContext = Join-Path ([IO.Path]::GetTempPath()) "drawmaha-acr-build-$tag"
     try {
@@ -75,10 +83,12 @@ try {
         '--user-assigned', $identityId, '--registry-identity', $identityId, '--registry-server', $registryServer,
         '--ingress', 'external', '--target-port', '8080', '--transport', 'http',
         '--cpu', '0.25', '--memory', '0.5Gi', '--min-replicas', '1', '--max-replicas', '1', '--revisions-mode', 'single',
-        '--secrets', "invite-key=$plainInvite", '--env-vars', 'DRAWMAHA_ACCESS_KEY=secretref:invite-key', 'ASPNETCORE_ENVIRONMENT=Production', '--output', 'none')
+        '--secrets', "invite-key=$plainInvite", '--env-vars', 'DRAWMAHA_ACCESS_KEY=secretref:invite-key', 'ASPNETCORE_ENVIRONMENT=Production',
+        "DRAWMAHA_TABLES_ENDPOINT=$walletEndpoint", 'DRAWMAHA_STARTING_BANK=10000', "AZURE_CLIENT_ID=$identityClientId", '--output', 'none')
     $domain = Invoke-Azure -Arguments @('containerapp', 'show', '--name', $AppName, '--resource-group', $ResourceGroupName, '--query', 'properties.configuration.ingress.fqdn', '-o', 'tsv')
     Write-Host "Unity server address: wss://$domain/ws"
     Write-Host "Health check: https://$domain/health"
+    Write-Host "Wallet storage account: $StorageAccountName"
     Write-Host 'Share the invite key privately. Set an Azure Cost Management budget for this resource group.'
 }
 finally { $plainInvite = $null; Pop-Location }
