@@ -8,8 +8,8 @@ namespace Drawmaha
     public sealed class HandAuditEvent
     {
         public string Kind, Stage, Detail;
-        public int Hand, Seat = -1, Amount, Position = -1, Dealer, SmallBlindSeat, BigBlindSeat;
-        public int SmallBlind, BigBlind, Actor, CurrentBet, LastRaise;
+        public int Hand, Seat = -1, Position = -1, Dealer, SmallBlindSeat, BigBlindSeat, Actor;
+        public float Amount, SmallBlind, BigBlind, CurrentBet, LastRaise;
         public int[] Indices;
         public Card[] Cards, Board;
         public AuditPlayer[] Players;
@@ -18,7 +18,8 @@ namespace Drawmaha
     public sealed class AuditPlayer
     {
         public string Name;
-        public int Seat, Stack, Bet, Contributed, Payout;
+        public int Seat;
+        public float Stack, Bet, Contributed, Payout;
         public bool InHand, Folded;
         public Card[] Cards;
     }

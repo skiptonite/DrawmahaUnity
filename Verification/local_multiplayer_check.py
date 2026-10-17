@@ -19,7 +19,7 @@ with socket.socket() as probe:
     probe.bind(('127.0.0.1', 0))
     port = probe.getsockname()[1]
 env = dict(os.environ)
-env.update(ASPNETCORE_ENVIRONMENT='Development', DRAWMAHA_ACCESS_KEY='test-invite-key-123456',
+env.update(ASPNETCORE_ENVIRONMENT='Development', DRAWMAHA_ACCESS_KEY='obsolete-key-must-be-ignored',
            DRAWMAHA_SHOWDOWN_SECONDS='1', DRAWMAHA_RECONNECT_SECONDS='3',
            DRAWMAHA_AUDIT_DIRECTORY=str(run_dir))
 env.pop('DRAWMAHA_TABLES_ENDPOINT', None)
@@ -41,7 +41,7 @@ with (run_dir / 'server.log').open('w', encoding='utf-8') as log:
                 time.sleep(.1)
         else:
             raise RuntimeError('Local test server did not become ready.')
-        test = 'chat_smoke.py' if '--chat' in sys.argv else 'multiplayer_smoke.py'
+        test = 'profile_smoke.py' if '--profile' in sys.argv else 'chat_smoke.py' if '--chat' in sys.argv else 'multiplayer_smoke.py'
         subprocess.run([sys.executable, str(root / 'Verification' / test),
                         f'ws://127.0.0.1:{port}/ws'], cwd=root, env=env, check=True, timeout=180)
     finally:

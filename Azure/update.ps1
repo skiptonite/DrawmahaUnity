@@ -82,7 +82,7 @@ try {
     $image = "$registryServer/drawmaha:$tag"
     Write-Host "Updating '$AppName' to $image"
     $null = Invoke-Azure -Arguments @('containerapp', 'update', '--name', $AppName, '--resource-group', $ResourceGroupName,
-        '--image', $image, '--min-replicas', '1', '--max-replicas', '1', '--set-env-vars', 'DRAWMAHA_AUDIT_KEY=secretref:audit-key')
+        '--image', $image, '--min-replicas', '1', '--max-replicas', '1', '--set-env-vars', 'DRAWMAHA_AUDIT_KEY=secretref:audit-key', '--remove-env-vars', 'DRAWMAHA_ACCESS_KEY')
 
     $healthUrl = "https://$fqdn/health"
     $healthy = $false
@@ -90,7 +90,7 @@ try {
     for ($attempt = 1; $attempt -le $HealthCheckAttempts; $attempt++) {
         try {
             $health = Invoke-RestMethod -Uri $healthUrl -Method Get -TimeoutSec 10
-            if ($health.status -eq 'ok' -and $health.protocol -eq 8) { $healthy = $true; break }
+            if ($health.status -eq 'ok' -and $health.protocol -eq 11) { $healthy = $true; break }
             $lastHealthError = "Unexpected health response: $($health | ConvertTo-Json -Compress)"
         }
         catch { $lastHealthError = $_.Exception.Message }

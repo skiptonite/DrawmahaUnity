@@ -1,5 +1,5 @@
 using System.Security.Cryptography;
-using System.Text.RegularExpressions;
+using System.Text;
 using Drawmaha.Network;
 
 namespace Drawmaha.Server;
@@ -7,7 +7,8 @@ namespace Drawmaha.Server;
 public sealed class Session
 {
     public string Token, Name, WalletId;
-    public int Avatar, Seat = -1, DisconnectedHand, LockedDrawHand = -1, AutoCallAmount = -1;
+    public int Avatar, Seat = -1, DisconnectedHand, LockedDrawHand = -1;
+    public float AutoCallAmount = -1;
     public int[] LockedDiscards;
     public Peer Peer;
     public Room Room;
@@ -23,6 +24,9 @@ public sealed class Session
 public sealed class Room
 {
     public readonly string Id, Name;
+    public readonly bool IsPublic;
+    public readonly byte[] InviteCodeHash;
+    public readonly float MinBuyIn, MaxBuyIn;
     public readonly Game Game;
     public readonly Session[] Seats = new Session[6];
     public readonly bool[] ReservedSeats = new bool[6];
@@ -34,13 +38,17 @@ public sealed class Room
     public DateTime Deadline, NextHand;
     public bool AnnouncedComplete;
     public int ArchivedHandNumber = -1;
-    public int BuyIn => Game.BigBlind * 100;
-    public Room(string id, string name, int small, int big, IHandAudit audit)
+    public float BuyIn => MinBuyIn;
+    public Room(string id, string name, float small, float big, float minBuyIn, float maxBuyIn, bool isPublic, byte[] inviteCodeHash, IHandAudit audit)
     {
-        Id = id; Name = name; Game = new Game(new SecureShuffleRandom(), 0, 6,
+        Id = id; Name = name; MinBuyIn = minBuyIn; MaxBuyIn = maxBuyIn; IsPublic = isPublic; InviteCodeHash = inviteCodeHash;
+        Game = new Game(new SecureShuffleRandom(), 0, 6,
             audit ?? throw new ArgumentNullException(nameof(audit))) { SmallBlind = small, BigBlind = big };
     }
-    public LobbyRow Lobby() => new() { id = Id, name = Name, smallBlind = Game.SmallBlind, bigBlind = Game.BigBlind, buyIn = BuyIn, occupied = Seats.Count(s => s != null) + ReservedSeats.Count(reserved => reserved), available = Enumerable.Range(0, Seats.Length).Count(i => Seats[i] == null && !ReservedSeats[i]), maxSeats = 6 };
+    public LobbyRow Lobby() => new() { id = Id, name = Name, smallBlind = Game.SmallBlind, bigBlind = Game.BigBlind, buyIn = MinBuyIn,
+        minBuyIn = MinBuyIn, maxBuyIn = MaxBuyIn, isPublic = IsPublic,
+        occupied = Seats.Count(s => s != null) + ReservedSeats.Count(reserved => reserved),
+        available = Enumerable.Range(0, Seats.Length).Count(i => Seats[i] == null && !ReservedSeats[i]), maxSeats = 6 };
     public TableState View(Session viewer, DateTime now)
     {
         int own = viewer?.Seat ?? -1;
@@ -49,7 +57,8 @@ public sealed class Room
         {
             id = Id, name = Name, yourSeat = own, hand = Game.HandNumber, revision = Revision,
             stage = Game.Stage.ToString(), dealer = Game.Dealer, smallBlindSeat = Game.SmallBlindSeat, bigBlindSeat = Game.BigBlindSeat,
-            smallBlind = Game.SmallBlind, bigBlind = Game.BigBlind, pot = Game.Pot > 0 ? Game.Pot : Game.LastPot, actor = Game.Actor,
+            smallBlind = Game.SmallBlind, bigBlind = Game.BigBlind, minBuyIn = MinBuyIn, maxBuyIn = MaxBuyIn,
+            pot = Game.Pot > 0 ? Game.Pot : Game.LastPot, actor = Game.Actor,
             call = own >= 0 && Game.IsBetting ? Game.ToCall(own) : 0,
             minRaise = Game.MinimumRaiseTo, maxRaise = own >= 0 && Game.IsBetting ? Game.MaximumRaiseTo(own) : 0,
             canRaise = own >= 0 && Game.CanRaise(own), showdown = Game.ShowdownReached,
@@ -89,23 +98,18 @@ public sealed class Hub
 {
     readonly object gate = new();
     readonly WalletStore wallets;
-    public readonly Room[] Rooms;
+    readonly HandAuditStore auditStore;
+    public readonly List<Room> Rooms = new();
     readonly Dictionary<string, Session> sessions = new();
     public readonly string Epoch = Guid.NewGuid().ToString("N");
-    readonly string accessKey;
     readonly int actionSeconds, showdownSeconds, reconnectSeconds;
     int connections;
-    public Hub(WalletStore wallets, HandAuditStore audit, string accessKey = null, int actionSeconds = 30, int showdownSeconds = 6, int reconnectSeconds = 90)
+    public Hub(WalletStore wallets, HandAuditStore audit, int actionSeconds = 30, int showdownSeconds = 6, int reconnectSeconds = 90)
     {
-        this.wallets = wallets;
-        Rooms = new[] { new Room("micro", "The Green Room", 1, 2, TimedAudit(audit.ForTable("micro"))),
-            new Room("standard", "Drawmaha Social", 5, 10, TimedAudit(audit.ForTable("standard"))),
-            new Room("deep", "The High Table", 25, 50, TimedAudit(audit.ForTable("deep"))) };
-        this.accessKey = accessKey ?? Environment.GetEnvironmentVariable("DRAWMAHA_ACCESS_KEY") ?? "";
+        this.wallets = wallets; auditStore = audit;
         this.actionSeconds = Setting("DRAWMAHA_ACTION_SECONDS", actionSeconds, 2, 120);
         this.showdownSeconds = Setting("DRAWMAHA_SHOWDOWN_SECONDS", showdownSeconds, 1, 30);
         this.reconnectSeconds = Setting("DRAWMAHA_RECONNECT_SECONDS", reconnectSeconds, 2, 600);
-        if (Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") == "Production" && this.accessKey.Length < 16) throw new InvalidOperationException("Production requires a DRAWMAHA_ACCESS_KEY of at least 16 characters.");
     }
     IHandAudit TimedAudit(IHandAudit sink) => new DeadlineAwareAudit(sink, delay =>
     {
@@ -120,12 +124,11 @@ public sealed class Hub
     {
         lock (gate)
         {
-            if (accessKey.Length > 0 && !CryptographicOperations.FixedTimeEquals(System.Text.Encoding.UTF8.GetBytes(accessKey), System.Text.Encoding.UTF8.GetBytes(hello.accessKey ?? ""))) throw new InvalidOperationException("Incorrect invite key.");
-            string name = (hello.username ?? "").Trim();
-            if (!Regex.IsMatch(name, @"^[a-zA-Z0-9][a-zA-Z0-9 _-]{1,19}$")) throw new ArgumentException("Display name: 2–20 letters, numbers, spaces, _ or -.");
+            if (hello.protocol < WireProtocol.Current) throw new InvalidOperationException("Update the game to connect to this server.");
+            string name = DisplayNameRules.Validate(hello.username);
             if (!Guid.TryParseExact(hello.walletId, "N", out Guid parsedWalletId)) throw new ArgumentException("A valid guest wallet identity is required.");
             string walletId = parsedWalletId.ToString("N");
-            int walletBalance = wallets.GetBalance(walletId);
+            float walletBalance = wallets.GetBalance(walletId);
             Session s;
             if (!string.IsNullOrEmpty(hello.token) && sessions.TryGetValue(hello.token, out s))
             {
@@ -152,7 +155,8 @@ public sealed class Hub
                 }
             }
             s.Peer = peer; s.LastSeen = DateTime.UtcNow; peer.Session = s;
-            peer.Send(new Envelope { type = "welcome", token = s.Token, epoch = Epoch, protocol = WireProtocol.Current, walletBalance = walletBalance });
+            peer.Send(new Envelope { type = "welcome", token = s.Token, epoch = Epoch, protocol = WireProtocol.Current,
+                walletBalance = walletBalance, username = s.Name, avatar = s.Avatar });
             peer.Send(new Envelope { type = "lobby", tables = Rooms.Select(r => r.Lobby()).ToArray() });
             if (s.Room != null) { Changed(s.Room, DateTime.UtcNow); SendChatHistory(s); }
         }
@@ -173,8 +177,10 @@ public sealed class Hub
             try
             {
                 if (string.IsNullOrEmpty(command.id) || command.id.Length > 64) throw new ArgumentException("A command ID is required.");
-                if (s.Seen.Contains(command.id)) { peer.Send(new Envelope { type = "ack", id = command.id }); if (s.Room != null) peer.Send(new Envelope { type = "state", table = s.Room.View(s, now) }); return; }
-                if (command.type == "join") Join(s, command, now);
+                if (s.Seen.Contains(command.id)) { if (command.type == "profile") SendProfile(s, command.id); peer.Send(new Envelope { type = "ack", id = command.id }); if (s.Room != null) peer.Send(new Envelope { type = "state", table = s.Room.View(s, now) }); return; }
+                if (command.type == "profile") UpdateProfile(s, command, now);
+                else if (command.type == "create") CreateTable(s, command, now);
+                else if (command.type == "join") Join(s, command, now);
                 else
                 {
                     var room = s.Room ?? throw new InvalidOperationException("Join a table first.");
@@ -187,12 +193,14 @@ public sealed class Hub
                         bool handInProgress = room.Game.Stage != Street.Waiting && room.Game.Stage != Street.Complete;
                         if (handInProgress && player.InHand) { s.Leaving = true; s.LeaveRequested = true; }
                         else Remove(s, handInProgress);
+                        RemoveEmptyRooms();
                         Changed(room, now); LobbyChanged();
                     }
                     else if (command.type == "rebuy")
                     {
                         Player player = room.Game.Players[s.Seat];
                         if (player.Stack != 0 || (player.InHand && room.Game.Stage != Street.Complete)) throw new InvalidOperationException("Rebuy is available between hands.");
+                        if (room.BuyIn > room.MaxBuyIn - player.Stack) throw new InvalidOperationException("The table maximum buy-in has been reached.");
                         wallets.Rebuy(s.WalletId, room.Id, room.BuyIn);
                         player.Stack = room.BuyIn; player.Action = "Rebuy";
                         room.Game.RecordSeatUpdate(s.Seat, "rebuy");
@@ -233,7 +241,7 @@ public sealed class Hub
                     else if (command.type == "autoCall")
                     {
                         Player player = room.Game.Players[s.Seat];
-                        int callAmount = room.Game.IsBetting && player.CanAct ? room.Game.ToCall(s.Seat) : 0;
+                        float callAmount = room.Game.IsBetting && player.CanAct ? room.Game.ToCall(s.Seat) : 0;
                         if (!room.Game.IsAwaitingAction(s.Seat) || !player.CanAct || command.hand != room.Game.HandNumber || callAmount <= 0 || command.callAmount != callAmount)
                             throw new InvalidOperationException("Call amount changed or your turn has started.");
                         s.AutoCallAmount = command.enabled ? callAmount : -1;
@@ -255,7 +263,9 @@ public sealed class Hub
                         {
                             case "fold": room.Game.Fold(s.Seat); break;
                             case "call": room.Game.Call(s.Seat); break;
-                            case "raise": room.Game.RaiseTo(s.Seat, command.raiseTo); break;
+                            case "raise":
+                                if (!IsValidChipAmount(command.raiseTo)) throw new ArgumentException("Raise amounts must use up to two decimal places.");
+                                room.Game.RaiseTo(s.Seat, command.raiseTo); break;
                             case "draw": room.Game.Draw(s.Seat, command.discards ?? Array.Empty<int>()); break;
                             default: throw new ArgumentException("Unknown command.");
                         }
@@ -278,6 +288,87 @@ public sealed class Hub
                 peer.Send(new Envelope { type = "error", message = e.Message, id = command.id });
                 if (s.Room != null) peer.Send(new Envelope { type = "state", table = s.Room.View(s, now) });
             }
+            catch (Exception e)
+            {
+                Console.Error.WriteLine("Unexpected table command failure: " + e.GetType().Name);
+                peer.Send(new Envelope { type = "error", message = "The server could not complete that request.", id = command.id });
+            }
+        }
+    }
+    static void SendProfile(Session session, string commandId) => session.Peer.Send(new Envelope {
+        type = "profile", id = commandId, username = session.Name, avatar = session.Avatar
+    });
+    void UpdateProfile(Session session, Command command, DateTime now)
+    {
+        string name = DisplayNameRules.Validate(command.username);
+        if (sessions.Values.Any(other => other != session && other.Name.Equals(name, StringComparison.OrdinalIgnoreCase)))
+            throw new ArgumentException("That display name is in use.");
+        if (command.avatar < 0 || command.avatar > 7) throw new ArgumentException("Choose a valid avatar.");
+        string previousName = session.Name;
+        session.Name = name; session.Avatar = command.avatar;
+        if (session.Room != null)
+        {
+            session.Room.Game.Players[session.Seat].Name = name;
+            if (previousName != name) session.Room.Game.Note(previousName + " changed display name to " + name + ".");
+            BroadcastState(session.Room, now);
+        }
+        SendProfile(session, command.id);
+    }
+    static string ValidateTableName(string value)
+    {
+        string name = (value ?? "").Trim();
+        if (!System.Text.RegularExpressions.Regex.IsMatch(name, @"^[a-zA-Z0-9][a-zA-Z0-9 _-]{2,31}$"))
+            throw new ArgumentException("Table names must be 3–32 letters, numbers, spaces, _ or -, starting with a letter or number.");
+        return name;
+    }
+    static string ValidateInviteCode(string value)
+    {
+        string code = (value ?? "").Trim().ToUpperInvariant();
+        if (!System.Text.RegularExpressions.Regex.IsMatch(code, @"^[A-Z0-9-]{8,24}$"))
+            throw new ArgumentException("Invite codes must be 8–24 letters, numbers, or hyphens.");
+        return code;
+    }
+    static byte[] HashInviteCode(string code) => SHA256.HashData(Encoding.UTF8.GetBytes(code));
+    static void ValidateTableSettings(Command command)
+    {
+        if (!IsValidChipAmount(command.smallBlind) || !IsValidChipAmount(command.bigBlind)
+            || command.smallBlind <= 0 || command.bigBlind <= command.smallBlind || command.bigBlind > 100000)
+            throw new ArgumentException("Choose positive blinds with up to two decimal places, where the big blind is larger and no more than 100,000.");
+        if (!IsValidChipAmount(command.minBuyIn) || !IsValidChipAmount(command.maxBuyIn))
+            throw new ArgumentException("Buy-ins must use valid amounts with up to two decimal places.");
+        if (command.minBuyIn < command.bigBlind || command.maxBuyIn < command.minBuyIn || command.maxBuyIn > 100000000)
+            throw new ArgumentException("Buy-ins must be at least one big blind, with the maximum no lower than the minimum and no more than 100,000,000.");
+    }
+    static bool IsValidChipAmount(float amount) => !float.IsNaN(amount) && !float.IsInfinity(amount)
+        && amount >= 0 && Math.Abs(amount * 100 - Math.Round(amount * 100)) < 0.001;
+    static float RoundChips(float amount) => (float)Math.Round(amount, 2, MidpointRounding.AwayFromZero);
+    void CreateTable(Session session, Command command, DateTime now)
+    {
+        if (session.Room != null) throw new InvalidOperationException("Leave your current table before creating another.");
+        if (Rooms.Count >= 100) throw new InvalidOperationException("The server has reached its table limit. Try again later.");
+        string name = ValidateTableName(command.tableName);
+        ValidateTableSettings(command);
+        command.smallBlind = RoundChips(command.smallBlind);
+        command.bigBlind = RoundChips(command.bigBlind);
+        command.minBuyIn = RoundChips(command.minBuyIn);
+        command.maxBuyIn = RoundChips(command.maxBuyIn);
+        byte[] codeHash = null;
+        if (!command.isPublic) codeHash = HashInviteCode(ValidateInviteCode(command.inviteCode));
+        if (wallets.GetBalance(session.WalletId) < command.minBuyIn)
+            throw new InvalidOperationException("Your main bank does not have enough chips for this table's minimum buy-in.");
+        string id = Guid.NewGuid().ToString("N");
+        Room room = new(id, name, command.smallBlind, command.bigBlind, command.minBuyIn, command.maxBuyIn,
+            command.isPublic, codeHash, TimedAudit(auditStore.ForTable(id)));
+        Rooms.Add(room);
+        try
+        {
+            Join(session, new Command { tableId = id, entryMode = "wait", buyInAmount = command.minBuyIn,
+                inviteCode = command.inviteCode }, now);
+        }
+        catch
+        {
+            if (session.Room != room) Rooms.Remove(room);
+            throw;
         }
     }
     static EntryMode ParseEntry(string entry) => entry == "post" ? EntryMode.PostBigBlind : entry == "wait" ? EntryMode.WaitForBigBlind : throw new ArgumentException("Choose post or wait.");
@@ -305,13 +396,21 @@ public sealed class Hub
         var entry = ParseEntry(command.entryMode);
         var room = Rooms.FirstOrDefault(r => r.Id == command.tableId) ?? throw new ArgumentException("Unknown table.");
         if (room.Game.Faulted) throw new InvalidOperationException("Table paused: secure hand recording failed.");
+        if (!room.IsPublic && !CryptographicOperations.FixedTimeEquals(room.InviteCodeHash, HashInviteCode(ValidateInviteCode(command.inviteCode))))
+            throw new InvalidOperationException("Incorrect invite code.");
+        if (!IsValidChipAmount(command.buyInAmount))
+            throw new ArgumentException("Buy-ins must use valid amounts with up to two decimal places.");
+        command.buyInAmount = RoundChips(command.buyInAmount);
+        if (command.buyInAmount < room.MinBuyIn || command.buyInAmount > room.MaxBuyIn)
+            throw new ArgumentException("Choose a buy-in within this table's minimum and maximum.");
         int seat = -1;
         for (int i = 0; i < room.Seats.Length; i++) if (room.Seats[i] == null && !room.ReservedSeats[i]) { seat = i; break; }
         if (seat < 0) throw new InvalidOperationException("Table is full.");
-        wallets.BuyIn(s.WalletId, room.Id, room.BuyIn);
+        wallets.BuyIn(s.WalletId, room.Id, command.buyInAmount);
         s.Room = room; s.Seat = seat; s.Entry = entry; s.Leaving = s.LeaveRequested = false; s.MissedBig = s.MissedSmall = false;
         s.CheckFold = false; s.AutoCallAmount = -1; s.LockedDrawHand = -1; s.LockedDiscards = null;
-        room.Seats[seat] = s; var p = room.Game.Players[seat]; p.Name = s.Name; p.Stack = room.BuyIn; p.Bet = p.Contributed = p.DrawCount = p.Payout = 0; p.Folded = p.InHand = p.Scoop = false; p.Action = ""; p.Cards.Clear();
+        room.Seats[seat] = s; var p = room.Game.Players[seat]; p.Name = s.Name; p.Stack = command.buyInAmount;
+        p.Bet = p.Contributed = p.Payout = 0; p.DrawCount = 0; p.Folded = p.InHand = p.Scoop = false; p.Action = ""; p.Cards.Clear();
         room.Game.Note(s.Name + " joins seat " + (seat + 1) + (entry == EntryMode.PostBigBlind ? " · post big blind" : " · wait for big blind"));
         room.Game.RecordSeatUpdate(seat, "join");
         WalletChanged(s);
@@ -322,7 +421,7 @@ public sealed class Hub
     {
         Room room = s.Room; if (room == null) return;
         Player player = room.Game.Players[s.Seat];
-        int balance = wallets.CashOut(s.WalletId, room.Id, player.Stack);
+        float balance = wallets.CashOut(s.WalletId, room.Id, player.Stack);
         room.ReservedSeats[s.Seat] = reserveSeat;
         room.Seats[s.Seat] = null; player.Stack = 0; player.Cards.Clear(); player.InHand = false;
         room.Game.RecordSeatUpdate(s.Seat, "leave");
@@ -421,7 +520,7 @@ public sealed class Hub
             int seat = room.Game.Actor;
             Session actor = room.Seats[seat];
             if (actor == null) return;
-            int callAmount = room.Game.ToCall(seat);
+            float callAmount = room.Game.ToCall(seat);
             if (actor.CheckFold)
             {
                 actor.CheckFold = false;
@@ -453,7 +552,7 @@ public sealed class Hub
     {
         lock (gate)
         {
-            foreach (var room in Rooms)
+            foreach (var room in Rooms.ToArray())
             {
                 if (room.Game.Faulted) continue;
                 try
@@ -520,6 +619,7 @@ public sealed class Hub
                     NotifyAuditFailure(room);
                 }
             }
+            if (RemoveEmptyRooms()) LobbyChanged();
             foreach (var pair in sessions.Where(p => p.Value.Peer == null && p.Value.Room == null && (now - p.Value.LastSeen).TotalMinutes > 20).ToArray()) sessions.Remove(pair.Key);
         }
     }
@@ -535,9 +635,14 @@ public sealed class Hub
         foreach (var session in room.Seats)
             session?.Peer?.Send(new Envelope { type = "error", message = "Table paused: secure hand recording failed." });
     }
+    bool RemoveEmptyRooms() => Rooms.RemoveAll(room => !room.Seats.Any(session => session != null) && !room.ReservedSeats.Any(reserved => reserved)) > 0;
     void Changed(Room room, DateTime now)
     {
         room.Revision++;
+        BroadcastState(room, now);
+    }
+    static void BroadcastState(Room room, DateTime now)
+    {
         foreach (var s in room.Seats) if (s?.Peer != null) s.Peer.Send(new Envelope { type = "state", table = room.View(s, DateTime.UtcNow) });
     }
     void LobbyChanged() { var rows = Rooms.Select(r => r.Lobby()).ToArray(); foreach (var s in sessions.Values) s.Peer?.Send(new Envelope { type = "lobby", tables = rows }); }

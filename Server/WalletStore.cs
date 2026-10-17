@@ -10,12 +10,14 @@ public sealed class WalletStore
     readonly object gate = new();
     readonly Dictionary<string, TableEntity> memory = new(StringComparer.Ordinal);
     readonly TableClient table;
-    readonly int startingBalance;
+    readonly float startingBalance;
 
     public WalletStore(IConfiguration configuration)
     {
-        startingBalance = int.TryParse(configuration["DRAWMAHA_STARTING_BANK"], out int configuredBalance)
-            ? Math.Clamp(configuredBalance, 0, int.MaxValue)
+        startingBalance = float.TryParse(configuration["DRAWMAHA_STARTING_BANK"], System.Globalization.NumberStyles.Float,
+            System.Globalization.CultureInfo.InvariantCulture, out float configuredBalance)
+            && !float.IsNaN(configuredBalance) && !float.IsInfinity(configuredBalance)
+            ? Math.Clamp(configuredBalance, 0, 100000000)
             : 10000;
         string endpoint = configuration["DRAWMAHA_TABLES_ENDPOINT"];
         if (string.IsNullOrWhiteSpace(endpoint))
@@ -31,59 +33,59 @@ public sealed class WalletStore
         RecoverOpenTables();
     }
 
-    public int GetBalance(string walletId)
+    public float GetBalance(string walletId)
     {
         lock (gate) return ReadBalance(GetWallet(walletId));
     }
 
-    public void BuyIn(string walletId, string tableId, int amount)
+    public void BuyIn(string walletId, string tableId, float amount)
     {
         lock (gate)
         {
             TableEntity wallet = GetWallet(walletId);
             if (!string.IsNullOrEmpty(ReadTableId(wallet))) throw new InvalidOperationException("Your chips are already reserved at a table.");
-            int balance = ReadBalance(wallet);
+            float balance = ReadBalance(wallet);
             if (balance < amount) throw new InvalidOperationException("Not enough chips in your main bank for this buy-in.");
-            wallet["Balance"] = balance - amount;
+            wallet["Balance"] = (double)RoundChips(balance - amount);
             wallet["TableId"] = tableId;
-            wallet["TableStack"] = amount;
+            wallet["TableStack"] = (double)amount;
             Save(wallet, -amount, "buy-in");
         }
     }
 
-    public void Rebuy(string walletId, string tableId, int amount)
+    public void Rebuy(string walletId, string tableId, float amount)
     {
         lock (gate)
         {
             TableEntity wallet = GetWallet(walletId);
             RequireTable(wallet, tableId);
-            int balance = ReadBalance(wallet);
+            float balance = ReadBalance(wallet);
             if (balance < amount) throw new InvalidOperationException("Not enough chips in your main bank for a rebuy.");
-            wallet["Balance"] = balance - amount;
-            wallet["TableStack"] = checked(ReadTableStack(wallet) + amount);
+            wallet["Balance"] = (double)RoundChips(balance - amount);
+            wallet["TableStack"] = (double)RoundChips(ReadTableStack(wallet) + amount);
             Save(wallet, -amount, "rebuy");
         }
     }
 
-    public void CheckpointStack(string walletId, string tableId, int stack)
+    public void CheckpointStack(string walletId, string tableId, float stack)
     {
         lock (gate)
         {
             TableEntity wallet = GetWallet(walletId);
             RequireTable(wallet, tableId);
             if (ReadTableStack(wallet) == stack) return;
-            wallet["TableStack"] = stack;
+            wallet["TableStack"] = (double)RoundChips(stack);
             Save(wallet, 0, null);
         }
     }
 
-    public int CashOut(string walletId, string tableId, int stack)
+    public float CashOut(string walletId, string tableId, float stack)
     {
         lock (gate)
         {
             TableEntity wallet = GetWallet(walletId);
             RequireTable(wallet, tableId);
-            wallet["Balance"] = checked(ReadBalance(wallet) + stack);
+            wallet["Balance"] = (double)RoundChips(ReadBalance(wallet) + stack);
             wallet["TableId"] = "";
             wallet["TableStack"] = 0;
             Save(wallet, stack, "cash-out");
@@ -123,7 +125,7 @@ public sealed class WalletStore
         }
     }
 
-    void Save(TableEntity wallet, int ledgerAmount, string reason)
+    void Save(TableEntity wallet, float ledgerAmount, string reason)
     {
         if (table == null)
         {
@@ -154,8 +156,8 @@ public sealed class WalletStore
             foreach (TableEntity wallet in table.Query<TableEntity>(filter: "RowKey eq 'wallet'"))
             {
                 if (string.IsNullOrEmpty(ReadTableId(wallet))) continue;
-                int stack = ReadTableStack(wallet);
-                wallet["Balance"] = checked(ReadBalance(wallet) + stack);
+                float stack = ReadTableStack(wallet);
+                wallet["Balance"] = (double)RoundChips(ReadBalance(wallet) + stack);
                 wallet["TableId"] = "";
                 wallet["TableStack"] = 0;
                 Save(wallet, stack, "server-restart-refund");
@@ -167,21 +169,22 @@ public sealed class WalletStore
         }
     }
 
-    static TableEntity NewWallet(string walletId, int startingBalance) => new(walletId, WalletRow)
+    static TableEntity NewWallet(string walletId, float startingBalance) => new(walletId, WalletRow)
     {
-        ["Balance"] = startingBalance,
+        ["Balance"] = (double)startingBalance,
         ["TableId"] = "",
-        ["TableStack"] = 0
+        ["TableStack"] = 0d
     };
 
-    static TableEntity NewLedger(string walletId, int amount, string reason) => new(walletId, "ledger-" + Guid.NewGuid().ToString("N"))
+    static TableEntity NewLedger(string walletId, float amount, string reason) => new(walletId, "ledger-" + Guid.NewGuid().ToString("N"))
     {
-        ["Amount"] = amount,
+        ["Amount"] = (double)amount,
         ["Reason"] = reason
     };
 
-    static int ReadBalance(TableEntity wallet) => Convert.ToInt32(wallet["Balance"]);
-    static int ReadTableStack(TableEntity wallet) => Convert.ToInt32(wallet["TableStack"]);
+    static float ReadBalance(TableEntity wallet) => RoundChips(Convert.ToSingle(wallet["Balance"], System.Globalization.CultureInfo.InvariantCulture));
+    static float ReadTableStack(TableEntity wallet) => RoundChips(Convert.ToSingle(wallet["TableStack"], System.Globalization.CultureInfo.InvariantCulture));
+    static float RoundChips(float amount) => (float)Math.Round(amount, 2, MidpointRounding.AwayFromZero);
     static string ReadTableId(TableEntity wallet) => wallet["TableId"] as string ?? "";
 
     static void RequireTable(TableEntity wallet, string tableId)

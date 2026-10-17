@@ -7,8 +7,7 @@ param(
     [string]$StorageAccountName,
     [string]$ResourceGroupName = 'drawmaha-rg',
     [string]$Location = 'centralus',
-    [string]$AppName = 'drawmaha',
-    [SecureString]$InviteKey
+    [string]$AppName = 'drawmaha'
 )
 $ErrorActionPreference = 'Stop'
 function Invoke-Azure {
@@ -26,9 +25,6 @@ function Invoke-Azure {
     }
     return $result
 }
-if (-not $InviteKey) { $InviteKey = Read-Host 'Invite key (16+ characters; share privately with players)' -AsSecureString }
-$plainInvite = [System.Net.NetworkCredential]::new('', $InviteKey).Password
-if ($plainInvite.Length -lt 16) { throw 'Use an invite key of at least 16 characters.' }
 $projectRoot = Split-Path $PSScriptRoot -Parent
 Push-Location $projectRoot
 try {
@@ -87,12 +83,12 @@ try {
         '--user-assigned', $identityId, '--registry-identity', $identityId, '--registry-server', $registryServer,
         '--ingress', 'external', '--target-port', '8080', '--transport', 'http',
         '--cpu', '0.25', '--memory', '0.5Gi', '--min-replicas', '1', '--max-replicas', '1', '--revisions-mode', 'single',
-        '--secrets', "invite-key=$plainInvite", "audit-key=$plainAuditKey", '--env-vars', 'DRAWMAHA_ACCESS_KEY=secretref:invite-key', 'DRAWMAHA_AUDIT_KEY=secretref:audit-key', 'ASPNETCORE_ENVIRONMENT=Production',
+        '--secrets', "audit-key=$plainAuditKey", '--env-vars', 'DRAWMAHA_AUDIT_KEY=secretref:audit-key', 'ASPNETCORE_ENVIRONMENT=Production',
         "DRAWMAHA_TABLES_ENDPOINT=$walletEndpoint", 'DRAWMAHA_STARTING_BANK=10000', "AZURE_CLIENT_ID=$identityClientId", '--output', 'none')
     $domain = Invoke-Azure -Arguments @('containerapp', 'show', '--name', $AppName, '--resource-group', $ResourceGroupName, '--query', 'properties.configuration.ingress.fqdn', '-o', 'tsv')
     Write-Host "Unity server address: wss://$domain/ws"
     Write-Host "Health check: https://$domain/health"
     Write-Host "Wallet storage account: $StorageAccountName"
-    Write-Host 'Share the invite key privately. Set an Azure Cost Management budget for this resource group.'
+    Write-Host 'Set an Azure Cost Management budget for this resource group.'
 }
-finally { $plainInvite = $null; $plainAuditKey = $null; Pop-Location }
+finally { $plainAuditKey = $null; Pop-Location }

@@ -1,0 +1,9 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0</TargetFramework><ImplicitUsings>enable</ImplicitUsings><EnableDefaultCompileItems>false</EnableDefaultCompileItems></PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../Assets/Drawmaha/Network/Wire.cs" />
+    <Compile Include="../Assets/Drawmaha/Network/LocalTestPlayer.cs" />
+    <Compile Include="../Assets/Drawmaha/Network/MultiplayerClient.cs" />
+    <Compile Include="ClientProfileChecks.cs" /><Compile Include="UnityNetworkTestStubs.cs" />
+  </ItemGroup>
+</Project>

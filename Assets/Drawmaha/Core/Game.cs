@@ -8,19 +8,20 @@ namespace Drawmaha
     {
         public int Dealer, SmallBlind, BigBlind;
         public bool[] Active;
-        public readonly Dictionary<int, int> EntryPosts = new Dictionary<int, int>();
-        public readonly Dictionary<int, int> DeadPosts = new Dictionary<int, int>();
+        public readonly Dictionary<int, float> EntryPosts = new Dictionary<int, float>();
+        public readonly Dictionary<int, float> DeadPosts = new Dictionary<int, float>();
     }
     public enum Street { Waiting, Preflop, Flop, Draw, Turn, River, Complete }
     public sealed class Player
     {
         public string Name;
-        public int Stack, Bet, Contributed, DrawCount, Payout;
+        public float Stack, Bet, Contributed, Payout;
+        public int DrawCount;
         public bool Folded, InHand;
         public bool Scoop;
         public readonly List<Card> Cards = new List<Card>();
         public string Action = "";
-        public Player(string name, int stack) { Name = name; Stack = stack; }
+        public Player(string name, float stack) { Name = name; Stack = stack; }
         public bool CanAct { get { return InHand && !Folded && Stack > 0; } }
     }
 
@@ -36,36 +37,36 @@ namespace Drawmaha
         public int Dealer { get; private set; } = -1;
         public int SmallBlindSeat { get; private set; }
         public int BigBlindSeat { get; private set; }
-        public int CurrentBet { get; private set; }
-        public int LastRaise { get; private set; }
+        public float CurrentBet { get; private set; }
+        public float LastRaise { get; private set; }
         public int HandNumber { get; private set; }
         public bool ShowdownReached { get; private set; }
-        public int LastPot { get; private set; }
+        public float LastPot { get; private set; }
         public bool IsAwaitingAction(int seat) => IsBetting && seat >= 0 && seat < Players.Length && pending.Contains(seat) && Players[seat].CanAct;
-        int contestablePot;
-        public int SmallBlind = 5, BigBlind = 10;
-        public int Pot { get { return Players.Sum(p => p.Contributed); } }
+        float contestablePot;
+        public float SmallBlind = 5, BigBlind = 10;
+        public float Pot { get { return RoundChips(Players.Sum(p => p.Contributed)); } }
         public bool IsBetting { get { return Stage == Street.Preflop || Stage == Street.Flop || Stage == Street.Turn || Stage == Street.River; } }
         readonly IRandomSource random;
         readonly IHandAudit audit;
         public bool Faulted { get; private set; }
         Deck deck;
         readonly HashSet<int> pending = new HashSet<int>();
-        readonly int[] actedAt;
+        readonly float[] actedAt;
 
-        public static Game CreateForTesting(int seed, int startingStack = 1000, int seatCount = 4)
+        public static Game CreateForTesting(int seed, float startingStack = 1000, int seatCount = 4)
         { return new Game(new DeterministicTestRandom(seed), startingStack, seatCount); }
-        public Game(IRandomSource shuffleRandom, int startingStack = 0, int seatCount = 6, IHandAudit audit = null)
+        public Game(IRandomSource shuffleRandom, float startingStack = 0, int seatCount = 6, IHandAudit audit = null)
         {
             if (seatCount < 2 || seatCount > 6) throw new ArgumentOutOfRangeException("seatCount");
             random = shuffleRandom ?? throw new ArgumentNullException("shuffleRandom");
             this.audit = audit;
             Players = Enumerable.Range(0, seatCount).Select(i => new Player("Player" + (i + 1), startingStack)).ToArray();
-            actedAt = new int[Players.Length];
+            actedAt = new float[Players.Length];
         }
         void RequireHealthy()
         { if (Faulted) throw new InvalidOperationException("Table paused: secure hand recording failed."); }
-        void Audit(string kind, int seat = -1, int amount = 0, int[] indices = null,
+        void Audit(string kind, int seat = -1, float amount = 0, int[] indices = null,
             Card[] cards = null, int position = -1, HandSetup setup = null, string detail = null)
         {
             if (audit == null) return;
@@ -103,7 +104,8 @@ namespace Drawmaha
             CurrentBet = 0; LastRaise = BigBlind; LastPot = contestablePot = 0; ShowdownReached = false;
             foreach (var player in Players)
             {
-                player.Bet = player.Contributed = player.DrawCount = player.Payout = 0;
+                player.Bet = player.Contributed = player.Payout = 0;
+                player.DrawCount = 0;
                 player.Folded = player.InHand = player.Scoop = false; player.Cards.Clear(); player.Action = "Waiting";
             }
         }
@@ -116,7 +118,7 @@ namespace Drawmaha
             HandNumber++; ShowdownReached = false; LastPot = contestablePot = 0; Board.Clear(); Results.Clear(); pending.Clear();
             for (int i = 0; i < Players.Length; i++)
             {
-                var p = Players[i]; p.InHand = p.Stack > 0 && (setup == null || setup.Active[i]); p.Folded = false; p.Bet = p.Contributed = p.DrawCount = p.Payout = 0; p.Scoop = false; p.Cards.Clear(); p.Action = p.InHand ? "" : "Waiting";
+                var p = Players[i]; p.InHand = p.Stack > 0 && (setup == null || setup.Active[i]); p.Folded = false; p.Bet = p.Contributed = p.Payout = 0; p.DrawCount = 0; p.Scoop = false; p.Cards.Clear(); p.Action = p.InHand ? "" : "Waiting";
             }
             Dealer = setup == null ? Next(Dealer, i => Players[i].InHand) : setup.Dealer;
             SmallBlindSeat = setup == null ? (Players.Count(p => p.InHand) == 2 ? Dealer : Next(Dealer, i => Players[i].InHand)) : setup.SmallBlind;
@@ -134,24 +136,31 @@ namespace Drawmaha
             if (setup != null) foreach (var post in setup.EntryPosts)
                 if (post.Key != BigBlindSeat && post.Key != SmallBlindSeat && Players[post.Key].InHand) { Pay(post.Key, post.Value); Players[post.Key].Action = "Entry big blind"; }
             if (setup != null) foreach (var post in setup.DeadPosts)
-                if (Players[post.Key].InHand) { int paid = Math.Min(post.Value, Players[post.Key].Stack); Players[post.Key].Stack -= paid; Players[post.Key].Contributed += paid; }
+                if (Players[post.Key].InHand)
+                {
+                    float paid = RoundChips(Math.Min(post.Value, Players[post.Key].Stack));
+                    Players[post.Key].Stack = RoundChips(Players[post.Key].Stack - paid);
+                    Players[post.Key].Contributed = RoundChips(Players[post.Key].Contributed + paid);
+                }
             CurrentBet = BigBlind; LastRaise = BigBlind; Stage = Street.Preflop;
             Note("Hand " + HandNumber + " · button at seat " + (Dealer + 1) + ".");
             BeginRound(BigBlindSeat, false);
         }
-        void Pay(int seat, int amount)
+        void Pay(int seat, float amount)
         {
-            var p = Players[seat]; int paid = Math.Min(amount, p.Stack);
-            p.Stack -= paid; p.Bet += paid; p.Contributed += paid;
+            var p = Players[seat]; float paid = RoundChips(Math.Min(amount, p.Stack));
+            p.Stack = RoundChips(p.Stack - paid);
+            p.Bet = RoundChips(p.Bet + paid);
+            p.Contributed = RoundChips(p.Contributed + paid);
         }
-        public int ToCall(int seat) { return Math.Min(Players[seat].Stack, Math.Max(0, CurrentBet - Players[seat].Bet)); }
-        public int MinimumRaiseTo { get { return CurrentBet + LastRaise; } }
-        public int MaximumRaiseTo(int seat) { return Math.Min(Players[seat].Bet + Players[seat].Stack, CurrentBet + Pot + Math.Max(0, CurrentBet - Players[seat].Bet)); }
+        public float ToCall(int seat) { return RoundChips(Math.Min(Players[seat].Stack, Math.Max(0, CurrentBet - Players[seat].Bet))); }
+        public float MinimumRaiseTo { get { return RoundChips(CurrentBet + LastRaise); } }
+        public float MaximumRaiseTo(int seat) { return RoundChips(Math.Min(Players[seat].Bet + Players[seat].Stack, CurrentBet + Pot + Math.Max(0, CurrentBet - Players[seat].Bet))); }
         public bool CanRaise(int seat)
         {
             if (!IsBetting || Actor != seat || !Players[seat].CanAct || Players.Count(p => p.CanAct) < 2) return false;
             if (actedAt[seat] >= 0 && CurrentBet - actedAt[seat] < LastRaise) return false;
-            int max = MaximumRaiseTo(seat);
+            float max = MaximumRaiseTo(seat);
             return max > CurrentBet && (max >= MinimumRaiseTo || max == Players[seat].Bet + Players[seat].Stack);
         }
         void RequireTurn(int seat)
@@ -167,19 +176,21 @@ namespace Drawmaha
         public void Call(int seat)
         {
             RequireTurn(seat); Audit("call", seat, ToCall(seat));
-            int amount = ToCall(seat); Pay(seat, amount); actedAt[seat] = CurrentBet;
+            float amount = ToCall(seat); Pay(seat, amount); actedAt[seat] = CurrentBet;
             Players[seat].Action = amount == 0 ? "Check" : "Call " + amount;
             if (Players[seat].Stack == 0) Players[seat].Action += " · all in";
             Note(Players[seat].Name + " · " + Players[seat].Action); FinishAction(seat);
         }
-        public void RaiseTo(int seat, int total)
+        public void RaiseTo(int seat, float total)
         {
             RequireTurn(seat);
+            if (float.IsNaN(total) || float.IsInfinity(total)) throw new ArgumentException("Enter a finite raise amount.");
+            total = RoundChips(total);
             if (!CanRaise(seat) || total <= CurrentBet || total > MaximumRaiseTo(seat)) throw new ArgumentException("Illegal pot-limit raise.");
             bool allIn = total == Players[seat].Bet + Players[seat].Stack;
             if (total < MinimumRaiseTo && !allIn) throw new ArgumentException("Raise below the minimum.");
             Audit("raise", seat, total);
-            int increase = total - CurrentBet; bool fullRaise = increase >= LastRaise;
+            float increase = total - CurrentBet; bool fullRaise = increase >= LastRaise;
             Pay(seat, total - Players[seat].Bet); CurrentBet = total;
             if (fullRaise) LastRaise = increase;
             actedAt[seat] = CurrentBet;
@@ -193,7 +204,9 @@ namespace Drawmaha
             var live = Enumerable.Range(0, Players.Length).Where(i => Players[i].InHand && !Players[i].Folded).ToArray();
             if (live.Length == 1)
             {
-                int amount = Pot; contestablePot = amount; Players[live[0]].Stack += amount; Players[live[0]].Payout += amount;
+                float amount = Pot; contestablePot = amount;
+                Players[live[0]].Stack = RoundChips(Players[live[0]].Stack + amount);
+                Players[live[0]].Payout = RoundChips(Players[live[0]].Payout + amount);
                 Results.Add(Players[live[0]].Name + " wins " + amount + " uncontested."); Complete(); return;
             }
             // An unmatched lone stack still gets its call/fold decision; no dry-side-pot bets.
@@ -255,12 +268,16 @@ namespace Drawmaha
             var omaha = Players.Select(p => p.InHand && !p.Folded ? HandEvaluator.Omaha(p.Cards, Board).Score : -1).ToArray();
             var levels = Players.Select(p => p.Contributed).Where(c => c > 0).Distinct().OrderBy(c => c).ToArray();
             int contestableLevels = levels.Count(level => Players.Count(p => p.Contributed >= level) > 1);
-            int previous = 0; int number = 0;
-            foreach (int level in levels)
+            float previous = 0; int number = 0;
+            foreach (float level in levels)
             {
                 int[] contributors = Enumerable.Range(0, Players.Length).Where(i => Players[i].Contributed >= level).ToArray();
-                int amount = (level - previous) * contributors.Length; previous = level;
-                if (contributors.Length == 1) { Players[contributors[0]].Stack += amount; Results.Add("Uncalled " + amount + " returned to " + Players[contributors[0]].Name + "."); continue; }
+                float amount = RoundChips((level - previous) * contributors.Length); previous = level;
+                if (contributors.Length == 1)
+                {
+                    Players[contributors[0]].Stack = RoundChips(Players[contributors[0]].Stack + amount);
+                    Results.Add("Uncalled " + amount + " returned to " + Players[contributors[0]].Name + "."); continue;
+                }
                 int[] eligible = contributors.Where(i => Players[i].InHand && !Players[i].Folded).ToArray();
                 if (eligible.Length == 0) throw new InvalidOperationException("A pot has no eligible winner.");
                 contestablePot += amount;
@@ -268,22 +285,25 @@ namespace Drawmaha
                     ? (number == 0 ? "Main pot · " : "Side pot " + number + " · ")
                     : "";
                 number++;
-                // The Omaha half receives the odd chip. Tied halves award odd chips left of button.
-                Award((amount + 1) / 2, eligible, omaha, label + "Omaha");
-                Award(amount / 2, eligible, hole, label + "Draw");
+                int amountCents = ToCents(amount);
+                Award((amountCents + 1) / 2 / 100f, eligible, omaha, label + "Omaha");
+                Award(amountCents / 2 / 100f, eligible, hole, label + "Draw");
             }
             Complete();
         }
-        void Award(int amount, int[] eligible, int[] scores, string label)
+        void Award(float amount, int[] eligible, int[] scores, string label)
         {
             int best = eligible.Max(i => scores[i]); var winners = eligible.Where(i => scores[i] == best).OrderBy(i => (i - Dealer - 1 + Players.Length) % Players.Length).ToArray();
-            int share = amount / winners.Length, remainder = amount % winners.Length;
+            int amountCents = ToCents(amount), shareCents = amountCents / winners.Length, remainderCents = amountCents % winners.Length;
             for (int n = 0; n < winners.Length; n++)
             {
-                int payout = share + (n < remainder ? 1 : 0);
-                Players[winners[n]].Stack += payout; Players[winners[n]].Payout += payout;
+                float payout = (shareCents + (n < remainderCents ? 1 : 0)) / 100f;
+                Players[winners[n]].Stack = RoundChips(Players[winners[n]].Stack + payout);
+                Players[winners[n]].Payout = RoundChips(Players[winners[n]].Payout + payout);
             }
             Results.Add(label + ": " + string.Join(" + ", winners.Select(i => Players[i].Name)) + " win " + amount + ".");
         }
+        static float RoundChips(float amount) => (float)Math.Round(amount, 2, MidpointRounding.AwayFromZero);
+        static int ToCents(float amount) => (int)Math.Round(amount * 100, MidpointRounding.AwayFromZero);
     }
 }

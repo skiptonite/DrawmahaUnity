@@ -28,7 +28,7 @@ app.Map("/ws", async context =>
         socket = await context.WebSockets.AcceptWebSocketAsync();
         peer = new Peer(socket, context.RequestAborted);
         var send = peer.SendLoop();
-        // Identity/invite belongs in the first frame, never a URL or log.
+        // Identity belongs in the first frame, never a URL or log.
         using var helloDeadline = CancellationTokenSource.CreateLinkedTokenSource(context.RequestAborted);
         helloDeadline.CancelAfter(TimeSpan.FromSeconds(10));
         var hello = await peer.Receive(helloDeadline.Token);

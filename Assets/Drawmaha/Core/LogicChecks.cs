@@ -87,6 +87,12 @@ namespace Drawmaha
             while (g.Stage != Street.Complete) Passive(g);
             Check(g.Players.Sum(p => p.Stack) == 4000, "Five-card draw conserves chips");
 
+            var fractional = Game.CreateForTesting(24, 10);
+            fractional.SmallBlind = 0.25f; fractional.BigBlind = 0.50f; fractional.StartHand();
+            Check(fractional.Pot == 0.75f, "Fractional blinds create the exact initial pot");
+            while (fractional.Stage != Street.Complete) Passive(fractional);
+            Check(Math.Abs(fractional.Players.Sum(p => p.Stack) - 40f) < 0.001f, "Fractional hand conserves chips");
+
             var shortRaise = Game.CreateForTesting(2); shortRaise.Players[1].Stack = 25; shortRaise.StartHand();
             shortRaise.RaiseTo(3, 20); shortRaise.Call(0); shortRaise.RaiseTo(1, 25); shortRaise.Call(2);
             Check(shortRaise.Actor == 3 && !shortRaise.CanRaise(3), "Short all-in does not reopen prior raiser");
@@ -110,8 +116,8 @@ namespace Drawmaha
             Replace(g.Players[1], "Jc Tc 3d 4d 5h"); // Omaha Broadway, weaker draw.
             Replace(g.Players[2], "Kh Ks 6d 6c 8s");
             Replace(g.Players[3], "Qd Qs 5d 5c 9h");
-            int[] pre = g.Players.Select(p => p.Stack).ToArray();
-            int pot = g.Pot; while (g.Stage != Street.Complete) Passive(g);
+            float[] pre = g.Players.Select(p => p.Stack).ToArray();
+            float pot = g.Pot; while (g.Stage != Street.Complete) Passive(g);
             Check(g.LastPot == pot && g.Pot == 0, "Settled pot remains available after completion");
             Check(!g.Results.Any(r => r.StartsWith("Main pot")), "Single pot is not labelled main pot");
             Check(g.Results.Any(r => r.StartsWith("Omaha:")) && g.Results.Any(r => r.StartsWith("Draw:")), "Single-pot hand results use Omaha and Draw labels");
@@ -132,7 +138,7 @@ namespace Drawmaha
             var tie = Game.CreateForTesting(19); tie.SmallBlind = 1; tie.BigBlind = 1; tie.StartHand(); Until(tie, Street.River);
             tie.Board.Clear(); tie.Board.AddRange(Parse("Ac Kd Qh 7s 2c"));
             Replace(tie.Players[0], "Jc Tc 9c 8c 6c"); Replace(tie.Players[1], "Jh Th 9h 8h 6h"); Replace(tie.Players[2], "3d 3c 4d 5d 6d"); Replace(tie.Players[3], "3h 3s 4h 5h 6s");
-            int[] old = tie.Players.Select(p => p.Stack).ToArray();
+            float[] old = tie.Players.Select(p => p.Stack).ToArray();
             while (tie.Stage != Street.Complete) Passive(tie);
             Check(tie.Players[0].Stack == old[0] + 2 && tie.Players[1].Stack == old[1] + 2, "Ties split both halves");
             Check(tie.Players[2].Stack == old[2] && tie.Players[3].Stack == old[3], "Flush draw beats paired draw");
@@ -140,7 +146,7 @@ namespace Drawmaha
             var odd = Game.CreateForTesting(21); odd.SmallBlind = 1; odd.BigBlind = 3; odd.Players[3].Stack = 0; odd.StartHand(); Until(odd, Street.River);
             odd.Board.Clear(); odd.Board.AddRange(Parse("Ac Kd Qh 7s 2c"));
             Replace(odd.Players[0], "Jc Tc 9c 8c 6c"); Replace(odd.Players[1], "Jh Th 9h 8h 6h"); Replace(odd.Players[2], "3d 3c 4d 5d 6d");
-            int[] oddBefore = odd.Players.Select(p => p.Stack).ToArray();
+            float[] oddBefore = odd.Players.Select(p => p.Stack).ToArray();
             Check(odd.Pot == 9, "Odd pot setup"); while (odd.Stage != Street.Complete) Passive(odd);
             Check(odd.Players[0].Stack - oddBefore[0] == 4 && odd.Players[1].Stack - oddBefore[1] == 5, "Odd pot chip to Omaha, tied odd chip left of button");
 
@@ -161,7 +167,7 @@ namespace Drawmaha
             {
                 var random = new Random(seed + 4000); var g = Game.CreateForTesting(seed);
                 foreach (var p in g.Players) p.Stack = random.Next(1, 301);
-                int total = g.Players.Sum(p => p.Stack); g.StartHand(); int actions = 0;
+                float total = g.Players.Sum(p => p.Stack); g.StartHand(); int actions = 0;
                 while (g.Stage != Street.Complete)
                 {
                     Check(++actions < 150, "Simulation terminates seed " + seed);
@@ -174,7 +180,9 @@ namespace Drawmaha
                     else if (random.NextDouble() < 0.12) g.Fold(seat);
                     else if (g.CanRaise(seat) && random.NextDouble() < 0.35)
                     {
-                        int max = g.MaximumRaiseTo(seat), min = Math.Min(g.MinimumRaiseTo, max); g.RaiseTo(seat, random.Next(min, max + 1));
+                        float max = g.MaximumRaiseTo(seat), min = Math.Min(g.MinimumRaiseTo, max);
+                        int minCents = (int)Math.Round(min * 100), maxCents = (int)Math.Round(max * 100);
+                        g.RaiseTo(seat, random.Next(minCents, maxCents + 1) / 100f);
                     }
                     else g.Call(seat);
                     Check(g.Players.All(p => p.Stack >= 0), "Nonnegative stacks");

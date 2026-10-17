@@ -14,5 +14,5 @@ foreach ($player in 1, 2) {
     # Visible interactive windows are the requested result of this launcher.
     Start-Process -FilePath $executable -WorkingDirectory (Split-Path $executable -Parent) -ArgumentList $arguments -WindowStyle Normal
 }
-Write-Host 'Opened Test Player 1 and Test Player 2. Enter different display names, connect, and join the same table.'
+Write-Host 'Opened Test Player 1 and Test Player 2. Choose a display name on first launch; saved players connect automatically. Join the same table.'
 if ($LocalServer) { Write-Host 'These windows expect a local game server already running at 127.0.0.1:8080.' }

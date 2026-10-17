@@ -12,3 +12,4 @@
 **/obj/
 .drawmaha-audit/
 !Verification/RngChecks.csproj
+!Verification/ClientProfileChecks.csproj

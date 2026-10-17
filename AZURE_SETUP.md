@@ -2,7 +2,7 @@
 
 ## Recommended starting architecture
 
-**One .NET 10 authoritative WebSocket server in Azure Container Apps Consumption, serving all three lobby tables.** Unity clients connect directly to its `wss://.../ws` endpoint. Azure terminates TLS; the process listens on port 8080. There is no Unity dedicated-server license/runtime on Azure and no client hosting the table.
+**One .NET 10 authoritative WebSocket server in Azure Container Apps Consumption, serving runtime-created private and public tables.** Unity clients connect directly to its `wss://.../ws` endpoint. Azure terminates TLS; the process listens on port 8080. There is no Unity dedicated-server license/runtime on Azure and no client hosting the table.
 
 This is a practical low-complexity starting point for a small private group. The authoritative state is tiny; no Azure SignalR, Redis, SQL database, PlayFab, AKS cluster, load balancer, or virtual machine is required. The shared C# core runs on the server; Unity only displays approved state and sends player commands. .NET 10 is LTS through November 2028.
 
@@ -17,12 +17,11 @@ This is a practical low-complexity starting point for a small private group. The
 | Azure Container Registry | Private image storage and remote Docker builds | Basic SKU; globally unique registry name |
 | User-assigned managed identity + `AcrPull` role | Pull the container without registry passwords | Scope role to that registry |
 | Azure Storage account + Table Storage | Durable guest wallets and transfer ledger | Standard general-purpose v2, Standard LRS; app identity gets `Storage Table Data Contributor` |
-| Container App secret `invite-key` | Restrict access to your private group | 16+ characters; reference as `DRAWMAHA_ACCESS_KEY` |
 | Cost Management budget | Spending visibility | Set an alert suitable for your budget; this is an alert, not a hard stop |
 
 The included script disables central log collection to avoid another recurring service. Live console logs remain available for debugging. Add a Log Analytics workspace later if persistent operational logs are useful. Do not enable frame/body logging: it would capture credentials and private cards. The wallet table uses the app's managed identity; no storage key is saved in the app.
 
-Azure's HTTP ingress already supports WebSockets and TLS. You do not need to purchase a domain or certificate; use the assigned `azurecontainerapps.io` hostname. If you later use built-in Azure authentication, the Unity transport also needs an identity/token flow; this version uses a private invite key and resumable guest tokens instead.
+Azure's HTTP ingress already supports WebSockets and TLS. You do not need to purchase a domain or certificate; use the assigned `azurecontainerapps.io` hostname. Players connect with guest identities and see active tables. Private table invite codes are separate from server access, never sent in lobby listings, and required only when joining a private table. Codes must be at least eight characters. Public tables are explicitly created without a code. Built-in Azure authentication would require a separate Unity identity/token flow.
 
 ## Costs
 
@@ -42,9 +41,9 @@ Budget for the Container App **plus** Basic registry storage, the Storage accoun
    .\Azure\deploy.ps1 -RegistryName skipdrawmaha2026 -ResourceGroupName drawmaha-rg -Location centralus
    ```
 
-   Replace the registry example with your own available name. The script prompts securely for an invite key; it creates billable resources only when **you run it**. It also creates a uniquely named wallet Storage account automatically. To choose its globally unique name, pass `-StorageAccountName <3-24-lowercase-letters-or-digits>`. It builds the image remotely with `az acr build`; Docker Desktop is not required for that route. If your subscription does not allow ACR Tasks/builds, build `Server/Dockerfile` locally with Docker, tag it for your registry, and push it instead.
-4. The script prints a `wss://<hostname>/ws` client address and `https://<hostname>/health` health URL. Check that health returns `{"status":"ok","protocol":8}`.
-5. Configure the generated `wss://` address as the client's default endpoint in `Assets/Drawmaha/Runtime/TableView.cs`, then build and distribute the client. Players enter the invite key and a display name on the connect screen; the lobby appears after connecting. Each installation keeps one guest identity per server, and changing the display name keeps the same wallet. The endpoint is no longer loaded from PlayerPrefs, so the configured build default is always used. The invite is not saved in the distributed game or PlayerPrefs; guest identity and reconnect token are saved locally per server.
+   Replace the registry example with your own available name. The script creates billable resources only when **you run it**. It also creates a uniquely named wallet Storage account automatically. To choose its globally unique name, pass `-StorageAccountName <3-24-lowercase-letters-or-digits>`. It builds the image remotely with `az acr build`; Docker Desktop is not required for that route. If your subscription does not allow ACR Tasks/builds, build `Server/Dockerfile` locally with Docker, tag it for your registry, and push it instead.
+4. The script prints a `wss://<hostname>/ws` client address and `https://<hostname>/health` health URL. Check that health returns `{"status":"ok","protocol":10}`.
+5. Configure the generated `wss://` address as the client's default endpoint in `Assets/Drawmaha/Runtime/TableView.cs`, then build and distribute the client. Players choose a display name once; saved players connect automatically on later launches. The top-right profile button changes the name/avatar without changing the wallet or seat. No invite code is required. Guest identity and reconnect token remain saved locally per server; test-player slots have separate saved profiles.
 6. Verify the Azure portal shows Consumption, min/max 1, single revision, target port 8080, and insecure ingress disabled. Set your budget alert.
 
    Azure role assignments can take time to propagate. If the image pull or Table Storage access fails immediately after role assignment, verify the role scopes and managed identity, wait for propagation, and retry. The script stops on errors and refuses to replace an already-running app.
@@ -63,7 +62,7 @@ This creates the account/table, grants `Storage Table Data Contributor`, and add
 
 | Variable | Default | Meaning |
 | --- | ---: | --- |
-| `DRAWMAHA_ACCESS_KEY` | Empty in Development | Production requires 16+ characters |
+| `DRAWMAHA_ACCESS_KEY` | Unused | Legacy setting ignored by the server; updater removes it from the app environment |
 | `DRAWMAHA_ACTION_SECONDS` | 30 | Time to act; server clamps to 2–120 seconds |
 | `DRAWMAHA_SHOWDOWN_SECONDS` | 6 | Delay before next hand; 1–30 seconds |
 | `DRAWMAHA_RECONNECT_SECONDS` | 90 | Seat reservation while offline; 2–600 seconds |
@@ -78,7 +77,7 @@ This creates the account/table, grants `Storage Table Data Contributor`, and add
 
 The deployment/update scripts now configure the audit key, and storage setup creates `handaudits`. The existing managed identity writes encrypted audit records into this separate table. Back up the key and records independently; losing the key prevents historical verification. See [RNG_AND_AUDITS.md](RNG_AND_AUDITS.md) for access restrictions, export/replay, and failure handling. Azure transaction costs and synchronous write latency increase with audit traffic. No Azure deployment was performed as part of the RNG changes.
 
-**Tables and reconnect sessions remain in memory; guest wallets and transfer records are durable in Table Storage.** Each completed hand checkpoints seated stacks. After restart, the server returns the last checkpointed stack to each wallet; an unfinished hand is rolled back. The client recognizes a new server epoch and returns to the lobby. Drain tables and announce a maintenance window before upgrades.
+**Table definitions, invite-code hashes, seats, and reconnect sessions remain in memory; guest wallets and transfer records are durable in Table Storage.** Created tables disappear on restart. Each completed hand checkpoints seated stacks. After restart, the server returns the last checkpointed stack to each wallet; an unfinished hand is rolled back. The client recognizes a new server epoch and returns to the lobby. Drain tables and announce a maintenance window before upgrades.
 
 After all tables are empty, run the updater from the project root. It builds a uniquely tagged image, asks you to type `EMPTY` before restarting the app, then checks the health endpoint. It requires an Azure CLI login and the existing registry/app names:
 

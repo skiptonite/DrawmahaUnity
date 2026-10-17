@@ -172,8 +172,8 @@ sealed class AuditSetupConverter : JsonConverter<HandSetup>
         var setup = new HandSetup { Dealer = root.GetProperty("Dealer").GetInt32(),
             SmallBlind = root.GetProperty("SmallBlind").GetInt32(), BigBlind = root.GetProperty("BigBlind").GetInt32(),
             Active = root.GetProperty("Active").Deserialize<bool[]>(options) };
-        foreach (var post in root.GetProperty("EntryPosts").EnumerateObject()) setup.EntryPosts.Add(int.Parse(post.Name, System.Globalization.CultureInfo.InvariantCulture), post.Value.GetInt32());
-        foreach (var post in root.GetProperty("DeadPosts").EnumerateObject()) setup.DeadPosts.Add(int.Parse(post.Name, System.Globalization.CultureInfo.InvariantCulture), post.Value.GetInt32());
+        foreach (var post in root.GetProperty("EntryPosts").EnumerateObject()) setup.EntryPosts.Add(int.Parse(post.Name, System.Globalization.CultureInfo.InvariantCulture), post.Value.GetSingle());
+        foreach (var post in root.GetProperty("DeadPosts").EnumerateObject()) setup.DeadPosts.Add(int.Parse(post.Name, System.Globalization.CultureInfo.InvariantCulture), post.Value.GetSingle());
         return setup;
     }
     public override void Write(Utf8JsonWriter writer, HandSetup value, JsonSerializerOptions options)

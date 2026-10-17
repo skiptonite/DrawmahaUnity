@@ -4,7 +4,9 @@ namespace Drawmaha.Network
 {
     public static class WireProtocol
     {
-        public const int Current = 8;
+        public const int Current = 11;
+        public const int PrivateTables = 11;
+        public const int ProfileUpdates = 9;
         public const int TableChat = 8;
         public const int WaitingPreferences = 5;
         public const int MainBank = 7;
@@ -12,22 +14,37 @@ namespace Drawmaha.Network
 
     [Serializable] public class Command
     {
-        public string type, username, token, walletId, accessKey, tableId, entryMode, id, message;
-        public int avatar, raiseTo, hand;
+        public string type, username, token, walletId, tableId, entryMode, id, message;
+        public string tableName, inviteCode;
+        public int avatar, hand, protocol;
+        public float raiseTo, smallBlind, bigBlind, minBuyIn, maxBuyIn, buyInAmount;
         public long revision;
-        public bool enabled;
-        public int callAmount;
+        public bool enabled, isPublic;
+        public float callAmount;
         public int[] discards;
     }
     [Serializable] public class Envelope
     {
         public string type, message, token, epoch, id;
-        public int protocol, walletBalance;
+        public int protocol;
+        public float walletBalance;
         public LobbyRow[] tables;
         public TableState table;
         public string tableId;
         public ChatMessageView chat;
         public ChatMessageView[] chatMessages;
+        public string username;
+        public int avatar;
+    }
+    public static class DisplayNameRules
+    {
+        public static string Validate(string value)
+        {
+            string name = (value ?? "").Trim();
+            if (!System.Text.RegularExpressions.Regex.IsMatch(name, @"^[a-zA-Z0-9][a-zA-Z0-9 _-]{1,19}$"))
+                throw new ArgumentException("Use 2–20 letters, numbers, spaces, _ or -. Start with a letter or number.");
+            return name;
+        }
     }
     public static class ChatRules
     {
@@ -78,7 +95,9 @@ namespace Drawmaha.Network
     [Serializable] public class LobbyRow
     {
         public string id, name;
-        public int smallBlind, bigBlind, buyIn, occupied, available, maxSeats;
+        public float smallBlind, bigBlind, buyIn, minBuyIn, maxBuyIn;
+        public int occupied, available, maxSeats;
+        public bool isPublic;
     }
     [Serializable] public class CardView { public int rank, suit; }
     [Serializable] public class HandHistoryPlayerView
@@ -97,16 +116,19 @@ namespace Drawmaha.Network
     }
     [Serializable] public class SeatView
     {
-        public int seat, avatar, stack, bet, count, drawCount;
+        public int seat, avatar, count, drawCount;
+        public float stack, bet;
         public string username, status, entryMode;
         public bool occupied, connected, inHand, folded, leaving, winner, scoop, needsRebuy, drawLocked, checkFold, callQueued, waitingToAct;
-        public int callAmount, queuedDrawCount;
+        public float callAmount;
+        public int queuedDrawCount;
         public CardView[] cards;
     }
     [Serializable] public class TableState
     {
         public string id, name, stage;
-        public int yourSeat, hand, dealer, smallBlindSeat, bigBlindSeat, smallBlind, bigBlind, pot, actor, call, minRaise, maxRaise;
+        public int yourSeat, hand, dealer, smallBlindSeat, bigBlindSeat, actor;
+        public float smallBlind, bigBlind, minBuyIn, maxBuyIn, pot, call, minRaise, maxRaise;
         public long revision, deadlineUnixMs, serverUnixMs;
         public bool canRaise, showdown;
         public SeatView[] players;

@@ -1,3 +1,13 @@
+# Saved profiles and no-invite onboarding — 2026-10-17
+
+- Removed the invite UI/server gate, including the production invite requirement. Existing invite-key environment settings are ignored; the updater removes that setting. Reconnect tokens continue to authenticate wallet/session continuity.
+- First launch asks only for a display name. Only a server-confirmed name/avatar is saved; returning profiles connect automatically. Names/avatars remain separate for local test-player slots.
+- Added the top-right avatar/name button and a profile window for changing name/avatar. Inspected both in the actual Unity Game view. UI compiled with no errors, and the Windows build succeeded with zero errors.
+- **31 server profile assertions passed:** no-invite access, validation, duplicate names, lobby/table edits, authoritative avatar/name confirmation, duplicate command protection, unchanged chips/turn state, chat naming and reconnect identity.
+- **14 real-client profile checks passed** with isolated test-only Unity preferences and controlled server packets: confirmed persistence, rejected/unconfirmed edits, independent betting/profile requests, reopening from a saved name, lobby reception, and test-slot isolation. The harness does not modify real player preferences.
+- Regressions passed: **1,840 multiplayer assertions**, **58 chat assertions**, **81 RNG/audit checks**, and **113,729 core assertions**. The multiplayer audit replayed four settled hands.
+- Azure scripts parsed successfully but were not deployed. Profile editing requires protocol 9 and the rebuilt client. Local checks: `python Verification/local_multiplayer_check.py --profile` and `dotnet run --project Verification/ClientProfileChecks.csproj`.
+
 # Local test-player profiles — 2026-10-17
 
 - Verified in Unity that the normal wallet key stays unchanged, profiles 1 and 2 use different keys, command-line profile selection overrides the editor default, and invalid profile numbers are rejected.

@@ -116,7 +116,8 @@ static class RngChecks
 
         var actionAudit = new Capture(); var actionGame = new Game(new SecureShuffleRandom(), 100, 6, actionAudit);
         actionGame.StartHand();
-        int actor = actionGame.Actor, stack = actionGame.Players[actor].Stack, pot = actionGame.Pot;
+        int actor = actionGame.Actor;
+        float stack = actionGame.Players[actor].Stack, pot = actionGame.Pot;
         actionAudit.Fail = true;
         Reject(() => actionGame.Call(actor), "Failed action audit throws before payment");
         Check(actionGame.Faulted && actionGame.Players[actor].Stack == stack && actionGame.Pot == pot, "Failed recording prevents financial action");

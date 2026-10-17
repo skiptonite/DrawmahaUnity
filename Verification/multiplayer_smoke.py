@@ -1,12 +1,11 @@
 """Run against a local server. Requires Python 3.11+ and websockets.
-Start with DRAWMAHA_ACCESS_KEY=test-invite-key-123456,
-DRAWMAHA_SHOWDOWN_SECONDS=1 and DRAWMAHA_RECONNECT_SECONDS=3.
+Start with DRAWMAHA_SHOWDOWN_SECONDS=1 and DRAWMAHA_RECONNECT_SECONDS=3.
 """
 import asyncio, json, sys, uuid
 import websockets
 
 URL = sys.argv[1] if len(sys.argv) > 1 else 'ws://127.0.0.1:8080/ws'
-KEY = 'test-invite-key-123456'
+PROTOCOL = 11
 assertions = 0
 
 def check(value, name):
@@ -25,14 +24,15 @@ class Client:
         self.wallet_balance = 0
         self.table = None
         self.rows = []
+        self.lobby_received = False
         self.messages = []
         self.fault = None
-    async def connect(self, key=KEY):
+    async def connect(self):
         self.ws = await websockets.connect(URL)
-        await self.ws.send(json.dumps(dict(type='hello', username=self.name, token=self.token, walletId=self.wallet_id, avatar=2, accessKey=key)))
+        await self.ws.send(json.dumps(dict(type='hello', username=self.name, token=self.token, walletId=self.wallet_id, avatar=2, protocol=PROTOCOL)))
         self.task = asyncio.create_task(self.reader())
         await wait_for(lambda: self.token or any(m['type']=='error' for m in self.messages))
-        if key == KEY: await wait_for(lambda: len(self.rows)==3)
+        if self.token: await wait_for(lambda: self.lobby_received)
         return self
     async def reader(self):
         try:
@@ -40,7 +40,7 @@ class Client:
                 m=json.loads(frame); self.messages.append(m)
                 if m['type']=='welcome': self.token=m['token']; self.wallet_balance=m['walletBalance']
                 if m['type']=='wallet': self.wallet_balance=m['walletBalance']
-                if m['type']=='lobby': self.rows=m['tables']
+                if m['type']=='lobby': self.rows=m['tables']; self.lobby_received=True
                 if m['type']=='left': self.table=None
                 if m['type']=='state':
                     t=m['table']; self.table=t
@@ -59,7 +59,8 @@ class Client:
         c.update(args)
         start=len(self.messages)
         await self.ws.send(json.dumps(c))
-        await wait_for(lambda: any(m.get('id')==cid and m['type'] in ('ack','error') for m in self.messages[start:]))
+        try: await wait_for(lambda: any(m.get('id')==cid and m['type'] in ('ack','error') for m in self.messages[start:]))
+        except TimeoutError as e: raise AssertionError(f'{kind} command timed out; received={self.messages[start:]}; fault={self.fault}; socket={self.ws.state}') from e
         return next(m for m in self.messages[start:] if m.get('id')==cid and m['type'] in ('ack','error'))
     async def close(self):
         await self.ws.close(); await self.task
@@ -103,32 +104,74 @@ async def finish_hand(clients, draw_all=False):
 async def main():
     clients=[]
     try:
-        bad=await Client('BadKey').connect(key='wrong')
-        check(any(m['type']=='error' and 'invite' in m['message'] for m in bad.messages),'Invite enforcement')
-        await bad.close()
+        guest=await Client('NoInvite').connect()
+        check(len(guest.rows)==0, 'Guests reach an empty lobby without a server invite code')
+        await guest.close()
+        public_host=await Client('PublicHost').connect(); clients.append(public_host)
+        result=await public_host.send('create',tableName='Public Test',smallBlind=1,bigBlind=2,minBuyIn=200,maxBuyIn=800,isPublic=True)
+        check(result['type']=='ack','Public table creation is acknowledged')
+        await wait_for(lambda:public_host.table is not None)
+        public_id=public_host.table['id']
+        await wait_for(lambda:any(row['id']==public_id for row in public_host.rows))
+        public_row=next(row for row in public_host.rows if row['id']==public_id)
+        check(public_row['isPublic'] and 'inviteCode' not in public_row,'Public table is listed without any invite-code field')
+        public_joiner=await Client('PublicJoiner').connect(); clients.append(public_joiner)
+        await public_joiner.send('join',tableId=public_id,entryMode='wait',buyInAmount=400)
+        await wait_for(lambda:public_joiner.table is not None and public_joiner.wallet_balance==9600)
+        check(public_joiner.table['id']==public_id,'Public table accepts a join without an invite code')
+        check(public_joiner.table['players'][public_joiner.table['yourSeat']]['stack']==400,'Joiner-selected buy-in becomes their stack')
+        await wait_for(lambda:public_host.table['stage']!='Waiting' and public_joiner.table['stage']!='Waiting')
+        await finish_hand([public_host,public_joiner])
+        await public_host.send('leave'); await public_joiner.send('leave')
+        await wait_for(lambda:public_host.table is None and public_joiner.table is None)
+        await wait_for(lambda:len(public_host.rows)==0)
+        await public_host.close(); await public_joiner.close()
+        clients.clear()
         for i in range(6): clients.append(await Client('Smoke'+str(i)).connect())
         check(all(c.wallet_balance==10000 for c in clients),'New guest wallets receive the configured starting bank')
-        check(all(r['maxSeats']==6 and r['available']==6 for r in clients[0].rows),'Empty lobby configuration')
-        await clients[0].send('join',tableId='standard',entryMode='wait')
+        check(len(clients[0].rows)==0,'Tables disappear from the lobby after their last player leaves')
+        result=await clients[0].send('create',tableName='Smoke Private',smallBlind=5,bigBlind=10,minBuyIn=1000,maxBuyIn=3000,isPublic=False,inviteCode='FELT-2026')
+        check(result['type']=='ack','Private table creation is acknowledged')
+        await wait_for(lambda:clients[0].table is not None)
+        main_table_id=clients[0].table['id']
+        await wait_for(lambda:any(row['id']==main_table_id for row in clients[0].rows))
+        private_row=next(row for row in clients[0].rows if row['id']==main_table_id)
+        check(not private_row['isPublic'] and 'inviteCode' not in private_row,'Private table appears in lobby without exposing its invite code')
         await wait_for(lambda:clients[0].wallet_balance==9000)
-        check(clients[0].wallet_balance==9000,'Joining debits the table buy-in from the bank')
+        check(clients[0].table['players'][clients[0].table['yourSeat']]['stack']==1000,'Creator is seated for the configured minimum buy-in')
+        wrong_code=await Client('WrongCode').connect()
+        rejected=await wrong_code.send('join',tableId=main_table_id,entryMode='wait',buyInAmount=1000,inviteCode='WRONG-42')
+        check(rejected['type']=='error' and 'invite code' in rejected['message'].lower(),'Private table rejects an incorrect invite code')
+        check(wrong_code.wallet_balance==10000,'Rejected private join does not debit the wallet')
+        rejected=await wrong_code.send('join',tableId=main_table_id,entryMode='wait',buyInAmount=1000)
+        check(rejected['type']=='error' and 'invite code' in rejected['message'].lower(),'Private table rejects a missing invite code')
+        rejected=await wrong_code.send('join',tableId=main_table_id,entryMode='wait',buyInAmount=3001,inviteCode='FELT-2026')
+        check(rejected['type']=='error' and 'minimum and maximum' in rejected['message'],'Server rejects a buy-in above the table maximum')
+        check(wrong_code.wallet_balance==10000,'Rejected joins leave the guest wallet untouched')
+        await wrong_code.close()
         await asyncio.sleep(.35)
         waiting=clients[0].table
-        check(waiting['stage']=='Waiting','One player cannot start')
-        check(waiting['hand']==0 and waiting['board']==[] and waiting['pot']==0 and waiting['results']==[],'Empty table stays free of hand state')
+        check(waiting['stage']=='Waiting' and waiting['hand']==0,'One seated player cannot start a hand')
+        check(waiting['board']==[] and waiting['pot']==0 and waiting['results']==[],'Empty table stays free of hand state')
         check(all(not p['inHand'] and p['count']==0 and not p['winner'] for p in waiting['players']),'Waiting players receive no cards or win')
-        await clients[1].send('join',tableId='standard',entryMode='wait')
+        check(all(r['maxSeats']==6 and r['available']==5 for r in clients[0].rows if r['id']==main_table_id),'Created table publishes live seat availability')
+        await clients[1].send('join',tableId=main_table_id,entryMode='wait',buyInAmount=1000,inviteCode='felt-2026')
         await wait_for(lambda:clients[0].table['hand']==1)
         check(sum(p['inHand'] for p in clients[0].table['players'])==2,'Auto-start with two players')
         initial=clients[0].table
-        await clients[2].send('join',tableId='standard',entryMode='post')
+        await clients[2].send('join',tableId=main_table_id,entryMode='post',buyInAmount=1000,inviteCode='FELT-2026')
         await wait_for(lambda:clients[0].table['players'][2]['occupied'])
         t=clients[0].table
         check(not t['players'][2]['inHand'] and t['players'][2]['count']==0,'Mid-hand arrival cannot get cards')
         check(t['smallBlindSeat']==initial['smallBlindSeat'] and t['bigBlindSeat']==initial['bigBlindSeat'],'Mid-hand arrival cannot move blinds')
-        for i in range(3,6): await clients[i].send('join',tableId='standard',entryMode='post')
+        for i in range(3,6): await clients[i].send('join',tableId=main_table_id,entryMode='post',buyInAmount=1000,inviteCode='FELT-2026')
+        await wait_for(lambda:clients[0].wallet_balance==9000)
+        await wait_for(lambda:all(c.wallet_balance==9000 for c in clients[:6]))
+        check(clients[0].wallet_balance==9000,'Creating a table debits the creator buy-in from the bank')
+        await asyncio.sleep(.35)
+        waiting=clients[0].table
         outsider=await Client('Outsider').connect()
-        r=await outsider.send('join',tableId='standard',entryMode='post')
+        r=await outsider.send('join',tableId=main_table_id,entryMode='post',buyInAmount=1000,inviteCode='FELT-2026')
         check(r['type']=='error' and 'full' in r['message'],'Seventh player rejected')
         check(outsider.wallet_balance==10000,'Rejected full-table join does not debit the bank')
         await outsider.close()
@@ -191,10 +234,13 @@ async def main():
         queued=await Client('QueuedLeave').connect(); clients.append(queued)
         leaving=await Client('HandLeave').connect(); clients.append(leaving)
         partner=await Client('LeavePartner').connect(); clients.append(partner)
-        await leaving.send('join',tableId='micro',entryMode='wait')
-        await partner.send('join',tableId='micro',entryMode='wait')
+        result=await leaving.send('create',tableName='Queued Leave',smallBlind=1,bigBlind=2,minBuyIn=200,maxBuyIn=1000,isPublic=False,inviteCode='LEAVE-42')
+        check(result['type']=='ack','Private queued-leave table is created')
+        await wait_for(lambda:leaving.table is not None)
+        leave_table_id=leaving.table['id']
+        await partner.send('join',tableId=leave_table_id,entryMode='wait',buyInAmount=200,inviteCode='LEAVE-42')
         await wait_for(lambda:leaving.table and leaving.table['hand']==1)
-        await queued.send('join',tableId='micro',entryMode='wait')
+        await queued.send('join',tableId=leave_table_id,entryMode='wait',buyInAmount=200,inviteCode='LEAVE-42')
         await wait_for(lambda:queued.table and queued.table['players'][queued.table['yourSeat']]['occupied'])
         await wait_for(lambda:queued.wallet_balance==9800)
         check(not queued.table['players'][queued.table['yourSeat']]['inHand'],'Queued player is not dealt into current hand')
@@ -243,8 +289,11 @@ async def main():
 
         showdown_leaving=await Client('ShowdownLeave').connect(); clients.append(showdown_leaving)
         showdown_partner=await Client('ShowdownPartner').connect(); clients.append(showdown_partner)
-        await showdown_leaving.send('join',tableId='micro',entryMode='wait')
-        await showdown_partner.send('join',tableId='micro',entryMode='wait')
+        result=await showdown_leaving.send('create',tableName='Showdown Leave',smallBlind=1,bigBlind=2,minBuyIn=200,maxBuyIn=1000,isPublic=False,inviteCode='SHOW-042')
+        check(result['type']=='ack','Private showdown table is created')
+        await wait_for(lambda:showdown_leaving.table is not None)
+        showdown_table_id=showdown_leaving.table['id']
+        await showdown_partner.send('join',tableId=showdown_table_id,entryMode='wait',buyInAmount=200,inviteCode='SHOW-042')
         await wait_for(lambda:showdown_leaving.table and showdown_leaving.table['players'][showdown_leaving.table['yourSeat']]['inHand'])
         check((await showdown_leaving.send('leave'))['type']=='ack','Showdown player can request deferred leave')
         await finish_hand([showdown_leaving,showdown_partner])
