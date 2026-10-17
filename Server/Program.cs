@@ -8,6 +8,8 @@ using Drawmaha.Network;
 var builder = WebApplication.CreateBuilder(args);
 builder.WebHost.ConfigureKestrel(o => o.Limits.MaxRequestBodySize = 8192);
 builder.Services.AddSingleton<WalletStore>();
+builder.Services.AddSingleton<HandAuditStore>(services => AuditConfiguration.Create(
+    services.GetRequiredService<IConfiguration>(), services.GetRequiredService<IHostEnvironment>()));
 builder.Services.AddSingleton<Hub>();
 builder.Services.AddHostedService<TableTicker>();
 var app = builder.Build();
@@ -96,6 +98,11 @@ namespace Drawmaha.Server
     {
         readonly Hub hub;
         public TableTicker(Hub hub) { this.hub = hub; }
+        public override async Task StopAsync(CancellationToken cancellationToken)
+        {
+            await base.StopAsync(cancellationToken);
+            hub.RecordShutdown();
+        }
         protected override async Task ExecuteAsync(CancellationToken stoppingToken)
         {
             using var timer = new PeriodicTimer(TimeSpan.FromMilliseconds(200));

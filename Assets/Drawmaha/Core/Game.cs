@@ -46,20 +46,49 @@ namespace Drawmaha
         public int SmallBlind = 5, BigBlind = 10;
         public int Pot { get { return Players.Sum(p => p.Contributed); } }
         public bool IsBetting { get { return Stage == Street.Preflop || Stage == Street.Flop || Stage == Street.Turn || Stage == Street.River; } }
-        readonly Random random;
+        readonly IRandomSource random;
+        readonly IHandAudit audit;
+        public bool Faulted { get; private set; }
         Deck deck;
         readonly HashSet<int> pending = new HashSet<int>();
         readonly int[] actedAt;
 
-        public Game(int seed = 1, int startingStack = 1000, int seatCount = 4)
-            : this(new Random(seed), startingStack, seatCount) { }
-        public Game(Random shuffleRandom, int startingStack = 0, int seatCount = 6)
+        public static Game CreateForTesting(int seed, int startingStack = 1000, int seatCount = 4)
+        { return new Game(new DeterministicTestRandom(seed), startingStack, seatCount); }
+        public Game(IRandomSource shuffleRandom, int startingStack = 0, int seatCount = 6, IHandAudit audit = null)
         {
             if (seatCount < 2 || seatCount > 6) throw new ArgumentOutOfRangeException("seatCount");
             random = shuffleRandom ?? throw new ArgumentNullException("shuffleRandom");
+            this.audit = audit;
             Players = Enumerable.Range(0, seatCount).Select(i => new Player("Player" + (i + 1), startingStack)).ToArray();
             actedAt = new int[Players.Length];
         }
+        void RequireHealthy()
+        { if (Faulted) throw new InvalidOperationException("Table paused: secure hand recording failed."); }
+        void Audit(string kind, int seat = -1, int amount = 0, int[] indices = null,
+            Card[] cards = null, int position = -1, HandSetup setup = null, string detail = null)
+        {
+            if (audit == null) return;
+            RequireHealthy();
+            try
+            {
+                audit.Record(new HandAuditEvent {
+                    Kind = kind, Hand = HandNumber, Stage = Stage.ToString(), Seat = seat, Amount = amount,
+                    Indices = indices == null ? null : (int[])indices.Clone(), Cards = cards, Position = position,
+                    Setup = setup, Detail = detail, Board = Board.ToArray(), Dealer = Dealer,
+                    SmallBlindSeat = SmallBlindSeat, BigBlindSeat = BigBlindSeat, SmallBlind = SmallBlind,
+                    BigBlind = BigBlind, Actor = Actor, CurrentBet = CurrentBet, LastRaise = LastRaise,
+                    Players = Players.Select((p, i) => new AuditPlayer { Seat = i, Name = p.Name, Stack = p.Stack,
+                        Bet = p.Bet, Contributed = p.Contributed, Payout = p.Payout, InHand = p.InHand,
+                        Folded = p.Folded, Cards = p.Cards.ToArray() }).ToArray()
+                });
+            }
+            catch (Exception e) { Faulted = true; throw new AuditFailureException(e); }
+        }
+        public void RecordInterruption(string reason)
+        { if (!Faulted && Stage != Street.Waiting && Stage != Street.Complete) Audit("interrupted", detail: reason); }
+        public void RecordSeatUpdate(int seat, string reason)
+        { if (Stage != Street.Waiting && Stage != Street.Complete) Audit("seat-update", seat, detail: reason); }
         int Next(int from, Func<int, bool> predicate)
         {
             for (int n = 1; n <= Players.Length; n++) { int i = (from + n + Players.Length) % Players.Length; if (predicate(i)) return i; }
@@ -80,10 +109,11 @@ namespace Drawmaha
         }
         public void StartHand(HandSetup setup)
         {
+            RequireHealthy();
             if (Stage != Street.Waiting && Stage != Street.Complete) throw new InvalidOperationException("Finish the current hand first.");
             if (Players.Count(p => p.Stack > 0) < 2) throw new InvalidOperationException("Start a new table: fewer than two funded players.");
             if (setup != null && (setup.Active == null || setup.Active.Length != Players.Length || setup.Active.Count(a => a) < 2 || setup.BigBlind < 0 || setup.BigBlind >= Players.Length || !setup.Active[setup.BigBlind])) throw new ArgumentException("Invalid hand setup.");
-            HandNumber++; ShowdownReached = false; LastPot = contestablePot = 0; Board.Clear(); Results.Clear(); pending.Clear(); deck = new Deck(random);
+            HandNumber++; ShowdownReached = false; LastPot = contestablePot = 0; Board.Clear(); Results.Clear(); pending.Clear();
             for (int i = 0; i < Players.Length; i++)
             {
                 var p = Players[i]; p.InHand = p.Stack > 0 && (setup == null || setup.Active[i]); p.Folded = false; p.Bet = p.Contributed = p.DrawCount = p.Payout = 0; p.Scoop = false; p.Cards.Clear(); p.Action = p.InHand ? "" : "Waiting";
@@ -91,6 +121,9 @@ namespace Drawmaha
             Dealer = setup == null ? Next(Dealer, i => Players[i].InHand) : setup.Dealer;
             SmallBlindSeat = setup == null ? (Players.Count(p => p.InHand) == 2 ? Dealer : Next(Dealer, i => Players[i].InHand)) : setup.SmallBlind;
             BigBlindSeat = setup == null ? Next(SmallBlindSeat, i => Players[i].InHand) : setup.BigBlind;
+            Stage = Street.Preflop; Actor = -1; CurrentBet = 0; LastRaise = BigBlind;
+            Audit("hand-start", setup: setup);
+            deck = new Deck(random, (kind, cards, position) => Audit(kind, cards: cards, position: position));
             int seat = Dealer;
             for (int r = 0; r < 5; r++) for (int n = 0; n < Players.Count(p => p.InHand); n++)
             {
@@ -123,15 +156,18 @@ namespace Drawmaha
         }
         void RequireTurn(int seat)
         {
+            RequireHealthy();
             if (Actor != seat || !IsBetting || !Players[seat].CanAct) throw new InvalidOperationException("Not this player's betting turn.");
         }
         public void Fold(int seat)
         {
-            RequireTurn(seat); Players[seat].Folded = true; Players[seat].Action = "Fold"; Note(Players[seat].Name + " folds."); FinishAction(seat);
+            RequireTurn(seat); Audit("fold", seat);
+            Players[seat].Folded = true; Players[seat].Action = "Fold"; Note(Players[seat].Name + " folds."); FinishAction(seat);
         }
         public void Call(int seat)
         {
-            RequireTurn(seat); int amount = ToCall(seat); Pay(seat, amount); actedAt[seat] = CurrentBet;
+            RequireTurn(seat); Audit("call", seat, ToCall(seat));
+            int amount = ToCall(seat); Pay(seat, amount); actedAt[seat] = CurrentBet;
             Players[seat].Action = amount == 0 ? "Check" : "Call " + amount;
             if (Players[seat].Stack == 0) Players[seat].Action += " · all in";
             Note(Players[seat].Name + " · " + Players[seat].Action); FinishAction(seat);
@@ -142,6 +178,7 @@ namespace Drawmaha
             if (!CanRaise(seat) || total <= CurrentBet || total > MaximumRaiseTo(seat)) throw new ArgumentException("Illegal pot-limit raise.");
             bool allIn = total == Players[seat].Bet + Players[seat].Stack;
             if (total < MinimumRaiseTo && !allIn) throw new ArgumentException("Raise below the minimum.");
+            Audit("raise", seat, total);
             int increase = total - CurrentBet; bool fullRaise = increase >= LastRaise;
             Pay(seat, total - Players[seat].Bet); CurrentBet = total;
             if (fullRaise) LastRaise = increase;
@@ -187,11 +224,12 @@ namespace Drawmaha
         }
         public void Draw(int seat, int[] indices)
         {
+            RequireHealthy();
             if (Stage != Street.Draw || Actor != seat) throw new InvalidOperationException("Not this player's draw turn.");
             ValidateDraw(indices);
             Card[] forbidden = indices.Select(i => Players[seat].Cards[i]).ToArray();
-            foreach (Card card in forbidden) deck.Discard(card);
-            foreach (int index in indices) Players[seat].Cards[index] = deck.Take(forbidden);
+            Audit("draw", seat, indices: indices, cards: forbidden);
+            foreach (int index in indices) Players[seat].Cards[index] = deck.Take();
             Players[seat].DrawCount = indices.Length; Players[seat].Action = indices.Length == 0 ? "Stand pat" : "Draw " + indices.Length;
             Note(Players[seat].Name + " · " + Players[seat].Action); pending.Remove(seat); Actor = Next(seat, i => pending.Contains(i));
             if (Actor >= 0) return;
@@ -208,6 +246,7 @@ namespace Drawmaha
             LastPot = Pot;
             foreach (var p in Players) { p.Scoop = p.Payout > 0 && p.Payout == contestablePot; p.Bet = 0; p.Contributed = 0; }
             Stage = Street.Complete; Actor = -1; pending.Clear();
+            Audit("settled", detail: string.Join(" | ", Results));
         }
         void Showdown()
         {

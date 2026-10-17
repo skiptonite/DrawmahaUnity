@@ -47,6 +47,7 @@ try {
     if ([string]::IsNullOrWhiteSpace($tableEndpoint) -or [string]::IsNullOrWhiteSpace($accountKey)) { throw 'Could not resolve the storage account table endpoint or provisioning key.' }
 
     $null = Invoke-Azure -Arguments @('storage', 'table', 'create', '--name', 'playerwallets', '--account-name', $StorageAccountName, '--account-key', $accountKey, '--output', 'none')
+    $null = Invoke-Azure -Arguments @('storage', 'table', 'create', '--name', 'handaudits', '--account-name', $StorageAccountName, '--account-key', $accountKey, '--output', 'none')
 
     if ($ConfigureApp -and [string]::IsNullOrWhiteSpace($IdentityPrincipalId)) {
         $identityName = "$AppName-pull"

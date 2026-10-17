@@ -69,10 +69,14 @@ This creates the account/table, grants `Storage Table Data Contributor`, and add
 | `DRAWMAHA_RECONNECT_SECONDS` | 90 | Seat reservation while offline; 2–600 seconds |
 | `DRAWMAHA_TABLES_ENDPOINT` | Required in Production | Table service endpoint, e.g. `https://<account>.table.core.windows.net` |
 | `DRAWMAHA_STARTING_BANK` | 10000 | Play-chip grant when a guest wallet is first created |
+| `DRAWMAHA_AUDIT_KEY` | Required in Production | Base64 32-byte audit encryption key; scripts reference the persistent `audit-key` Container Apps secret |
+| `DRAWMAHA_AUDIT_DIRECTORY` | Unset | Optional durable file-volume override; otherwise audits use the `handaudits` table at the wallet storage endpoint |
 | `AZURE_CLIENT_ID` | Managed identity default | Client ID of the user-assigned identity allowed to access the wallet table |
 | `ASPNETCORE_HTTP_PORTS` | 8080 in container | Backend listener |
 
 ## Updates, restart, and scaling
+
+The deployment/update scripts now configure the audit key, and storage setup creates `handaudits`. The existing managed identity writes encrypted audit records into this separate table. Back up the key and records independently; losing the key prevents historical verification. See [RNG_AND_AUDITS.md](RNG_AND_AUDITS.md) for access restrictions, export/replay, and failure handling. Azure transaction costs and synchronous write latency increase with audit traffic. No Azure deployment was performed as part of the RNG changes.
 
 **Tables and reconnect sessions remain in memory; guest wallets and transfer records are durable in Table Storage.** Each completed hand checkpoints seated stacks. After restart, the server returns the last checkpointed stack to each wallet; an unfinished hand is rolled back. The client recognizes a new server epoch and returns to the lobby. Drain tables and announce a maintenance window before upgrades.
 

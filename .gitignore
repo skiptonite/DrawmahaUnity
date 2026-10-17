@@ -10,3 +10,5 @@
 *.user
 **/bin/
 **/obj/
+.drawmaha-audit/
+!Verification/RngChecks.csproj

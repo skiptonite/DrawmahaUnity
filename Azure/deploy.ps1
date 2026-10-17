@@ -77,13 +77,17 @@ try {
     }
     finally { Remove-Item -LiteralPath $buildContext -Recurse -Force -ErrorAction SilentlyContinue }
     $environmentName = "$AppName-env"
+    $auditKeyBytes = New-Object byte[] 32
+    $auditGenerator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $auditGenerator.GetBytes($auditKeyBytes); $plainAuditKey = [Convert]::ToBase64String($auditKeyBytes) }
+    finally { $auditGenerator.Dispose(); [Array]::Clear($auditKeyBytes, 0, $auditKeyBytes.Length) }
     Invoke-Azure -Arguments @('containerapp', 'env', 'create', '--name', $environmentName, '--resource-group', $ResourceGroupName, '--location', $Location, '--logs-destination', 'none', '--output', 'none')
     Invoke-Azure -Arguments @('containerapp', 'create', '--name', $AppName, '--resource-group', $ResourceGroupName,
         '--environment', $environmentName, '--image', "$registryServer/drawmaha:$tag",
         '--user-assigned', $identityId, '--registry-identity', $identityId, '--registry-server', $registryServer,
         '--ingress', 'external', '--target-port', '8080', '--transport', 'http',
         '--cpu', '0.25', '--memory', '0.5Gi', '--min-replicas', '1', '--max-replicas', '1', '--revisions-mode', 'single',
-        '--secrets', "invite-key=$plainInvite", '--env-vars', 'DRAWMAHA_ACCESS_KEY=secretref:invite-key', 'ASPNETCORE_ENVIRONMENT=Production',
+        '--secrets', "invite-key=$plainInvite", "audit-key=$plainAuditKey", '--env-vars', 'DRAWMAHA_ACCESS_KEY=secretref:invite-key', 'DRAWMAHA_AUDIT_KEY=secretref:audit-key', 'ASPNETCORE_ENVIRONMENT=Production',
         "DRAWMAHA_TABLES_ENDPOINT=$walletEndpoint", 'DRAWMAHA_STARTING_BANK=10000', "AZURE_CLIENT_ID=$identityClientId", '--output', 'none')
     $domain = Invoke-Azure -Arguments @('containerapp', 'show', '--name', $AppName, '--resource-group', $ResourceGroupName, '--query', 'properties.configuration.ingress.fqdn', '-o', 'tsv')
     Write-Host "Unity server address: wss://$domain/ws"
@@ -91,4 +95,4 @@ try {
     Write-Host "Wallet storage account: $StorageAccountName"
     Write-Host 'Share the invite key privately. Set an Azure Cost Management budget for this resource group.'
 }
-finally { $plainInvite = $null; Pop-Location }
+finally { $plainInvite = $null; $plainAuditKey = $null; Pop-Location }

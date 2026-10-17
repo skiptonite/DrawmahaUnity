@@ -60,13 +60,13 @@ namespace Drawmaha
         }
         static void BettingChecks()
         {
-            var pendingAction = new Game(16); pendingAction.StartHand();
+            var pendingAction = Game.CreateForTesting(16); pendingAction.StartHand();
             int bettor = pendingAction.Actor;
             pendingAction.RaiseTo(bettor, pendingAction.MinimumRaiseTo);
             Check(!pendingAction.IsAwaitingAction(bettor), "Bettor is not awaiting another action while opponents respond");
             Check(pendingAction.IsAwaitingAction(pendingAction.Actor), "Next player remains awaiting action after a bet");
 
-            var g = new Game(17); g.StartHand();
+            var g = Game.CreateForTesting(17); g.StartHand();
             Check(g.Dealer == 0 && g.SmallBlindSeat == 1 && g.BigBlindSeat == 2 && g.Actor == 3, "Four-seat blind order");
             Check(g.MaximumRaiseTo(3) == 35 && g.MinimumRaiseTo == 20, "Initial pot-limit bounds");
             Reject(() => g.RaiseTo(3, 36), "Over-pot raise rejected");
@@ -87,16 +87,16 @@ namespace Drawmaha
             while (g.Stage != Street.Complete) Passive(g);
             Check(g.Players.Sum(p => p.Stack) == 4000, "Five-card draw conserves chips");
 
-            var shortRaise = new Game(2); shortRaise.Players[1].Stack = 25; shortRaise.StartHand();
+            var shortRaise = Game.CreateForTesting(2); shortRaise.Players[1].Stack = 25; shortRaise.StartHand();
             shortRaise.RaiseTo(3, 20); shortRaise.Call(0); shortRaise.RaiseTo(1, 25); shortRaise.Call(2);
             Check(shortRaise.Actor == 3 && !shortRaise.CanRaise(3), "Short all-in does not reopen prior raiser");
             shortRaise.Call(3); Check(!shortRaise.CanRaise(0), "Short all-in does not reopen prior caller"); shortRaise.Call(0);
 
-            var hu = new Game(3); hu.Players[1].Stack = hu.Players[2].Stack = 0; hu.StartHand();
+            var hu = Game.CreateForTesting(3); hu.Players[1].Stack = hu.Players[2].Stack = 0; hu.StartHand();
             Check(hu.SmallBlindSeat == hu.Dealer && hu.Actor == hu.Dealer, "Heads-up button posts small blind and acts first");
             Until(hu, Street.Flop); Check(hu.Actor == hu.BigBlindSeat, "Heads-up big blind acts first postflop");
 
-            var dry = new Game(7); dry.Players[1].Stack = 5; dry.Players[2].Stack = 10; dry.StartHand();
+            var dry = Game.CreateForTesting(7); dry.Players[1].Stack = 5; dry.Players[2].Stack = 10; dry.StartHand();
             dry.Fold(3); Check(!dry.CanRaise(0), "No dry-side-pot raise"); dry.Call(0);
             Check(dry.Stage == Street.Draw, "All-in board auto-runs to draw");
             while (dry.Stage != Street.Complete) Passive(dry);
@@ -104,7 +104,7 @@ namespace Drawmaha
         }
         static void SettlementChecks()
         {
-            var g = new Game(12); g.StartHand(); Until(g, Street.River);
+            var g = Game.CreateForTesting(12); g.StartHand(); Until(g, Street.River);
             g.Board.Clear(); g.Board.AddRange(Parse("Ac Kd Qh 7s 2c"));
             Replace(g.Players[0], "Ah Ad As 9d 8d"); // Draw quads, Omaha trip aces.
             Replace(g.Players[1], "Jc Tc 3d 4d 5h"); // Omaha Broadway, weaker draw.
@@ -118,7 +118,7 @@ namespace Drawmaha
             Check(g.Players[0].Stack - pre[0] == pot / 2, "Draw half awarded to quads");
             Check(g.Players[1].Stack - pre[1] == pot / 2, "Omaha half awarded to Broadway");
 
-            var side = new Game(18); side.Players[0].Stack = 20; side.StartHand();
+            var side = Game.CreateForTesting(18); side.Players[0].Stack = 20; side.StartHand();
             side.RaiseTo(3, 35); side.Call(0); side.Call(1); side.Call(2); Until(side, Street.River);
             side.Board.Clear(); side.Board.AddRange(Parse("Ac Kd Qh 7s 2c"));
             Replace(side.Players[0], "Ah Ad As 9d 8d"); Replace(side.Players[1], "Jc Tc 3d 4d 5h"); Replace(side.Players[2], "Kh Ks 6d 6c 8s"); Replace(side.Players[3], "Qd Qs 5d 5c 9h");
@@ -129,7 +129,7 @@ namespace Drawmaha
             Check(side.Results.Any(r => r.StartsWith("Main pot · Omaha:")) && side.Results.Any(r => r.StartsWith("Side pot 1 · Draw:")), "Layered pot results identify each pot and hand");
             Check(side.Players.Sum(p => p.Stack) == 3020, "Side-pot chip conservation");
 
-            var tie = new Game(19); tie.SmallBlind = 1; tie.BigBlind = 1; tie.StartHand(); Until(tie, Street.River);
+            var tie = Game.CreateForTesting(19); tie.SmallBlind = 1; tie.BigBlind = 1; tie.StartHand(); Until(tie, Street.River);
             tie.Board.Clear(); tie.Board.AddRange(Parse("Ac Kd Qh 7s 2c"));
             Replace(tie.Players[0], "Jc Tc 9c 8c 6c"); Replace(tie.Players[1], "Jh Th 9h 8h 6h"); Replace(tie.Players[2], "3d 3c 4d 5d 6d"); Replace(tie.Players[3], "3h 3s 4h 5h 6s");
             int[] old = tie.Players.Select(p => p.Stack).ToArray();
@@ -137,20 +137,20 @@ namespace Drawmaha
             Check(tie.Players[0].Stack == old[0] + 2 && tie.Players[1].Stack == old[1] + 2, "Ties split both halves");
             Check(tie.Players[2].Stack == old[2] && tie.Players[3].Stack == old[3], "Flush draw beats paired draw");
 
-            var odd = new Game(21); odd.SmallBlind = 1; odd.BigBlind = 3; odd.Players[3].Stack = 0; odd.StartHand(); Until(odd, Street.River);
+            var odd = Game.CreateForTesting(21); odd.SmallBlind = 1; odd.BigBlind = 3; odd.Players[3].Stack = 0; odd.StartHand(); Until(odd, Street.River);
             odd.Board.Clear(); odd.Board.AddRange(Parse("Ac Kd Qh 7s 2c"));
             Replace(odd.Players[0], "Jc Tc 9c 8c 6c"); Replace(odd.Players[1], "Jh Th 9h 8h 6h"); Replace(odd.Players[2], "3d 3c 4d 5d 6d");
             int[] oddBefore = odd.Players.Select(p => p.Stack).ToArray();
             Check(odd.Pot == 9, "Odd pot setup"); while (odd.Stage != Street.Complete) Passive(odd);
             Check(odd.Players[0].Stack - oddBefore[0] == 4 && odd.Players[1].Stack - oddBefore[1] == 5, "Odd pot chip to Omaha, tied odd chip left of button");
 
-            var refund = new Game(22); refund.Players[0].Stack = 20; refund.StartHand();
+            var refund = Game.CreateForTesting(22); refund.Players[0].Stack = 20; refund.StartHand();
             refund.RaiseTo(3, 35); refund.Call(0); refund.Fold(1); refund.Fold(2);
             while (refund.Stage != Street.Complete) Passive(refund);
             Check(refund.Results.Any(r => r == "Uncalled 15 returned to Player4."), "Uncalled excess returned at showdown");
             Check(refund.Players.Sum(p => p.Stack) == 3020, "Refund plus folded dead money conserves chips");
 
-            var fold = new Game(1); fold.StartHand(); fold.Fold(3); fold.Fold(0); fold.Fold(1);
+            var fold = Game.CreateForTesting(1); fold.StartHand(); fold.Fold(3); fold.Fold(0); fold.Fold(1);
             Check(fold.Stage == Street.Complete && fold.Players[2].Stack == 1005 && fold.Pot == 0, "Uncontested pot settled once");
             Check(fold.LastPot == 15 && fold.Players[2].Payout == 15 && fold.Players[2].Scoop, "Uncontested winner receives scoop and settled pot is retained");
 
@@ -159,7 +159,7 @@ namespace Drawmaha
         {
             for (int seed = 0; seed < 1000; seed++)
             {
-                var random = new Random(seed + 4000); var g = new Game(seed);
+                var random = new Random(seed + 4000); var g = Game.CreateForTesting(seed);
                 foreach (var p in g.Players) p.Stack = random.Next(1, 301);
                 int total = g.Players.Sum(p => p.Stack); g.StartHand(); int actions = 0;
                 while (g.Stage != Street.Complete)
@@ -186,7 +186,7 @@ namespace Drawmaha
             }
             for (int seed = 0; seed < 20; seed++)
             {
-                var g = new Game(seed, 100);
+                var g = Game.CreateForTesting(seed, 100);
                 for (int n = 0; n < 30 && g.Players.Count(p => p.Stack > 0) > 1; n++)
                 {
                     g.StartHand(); int actions = 0;
@@ -199,7 +199,7 @@ namespace Drawmaha
         {
             for (int seed = 0; seed < 500; seed++)
             {
-                var random = new Random(seed + 811); var g = new Game(seed, 100, 6); g.StartHand();
+                var random = new Random(seed + 811); var g = Game.CreateForTesting(seed, 100, 6); g.StartHand();
                 int guard = 0; var discarded = new Dictionary<int, Card[]>();
                 while (g.Stage != Street.Complete)
                 {
@@ -216,11 +216,11 @@ namespace Drawmaha
                     else if (seed >= 100 && g.CanRaise(g.Actor) && random.NextDouble() < 0.3) g.RaiseTo(g.Actor, g.MaximumRaiseTo(g.Actor));
                     else g.Call(g.Actor);
                     var cards = g.Players.SelectMany(p => p.Cards).Concat(g.Board).ToArray();
-                    Check(cards.Distinct().Count() == cards.Length, "Six-seat live cards unique after recycling");
+                    Check(cards.Distinct().Count() == cards.Length, "Six-seat fixed-deck live cards unique");
                     Check(g.Players.Sum(p => p.Stack) + g.Pot == 600, "Six-seat chip conservation");
                 }
             }
-            var uncontested = new Game(4, 100, 6); uncontested.StartHand();
+            var uncontested = Game.CreateForTesting(4, 100, 6); uncontested.StartHand();
             while (uncontested.Stage != Street.Complete) uncontested.Fold(uncontested.Actor);
             Check(!uncontested.ShowdownReached, "Uncontested wins never trigger reveal");
         }

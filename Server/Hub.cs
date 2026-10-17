@@ -4,11 +4,6 @@ using Drawmaha.Network;
 
 namespace Drawmaha.Server;
 
-public sealed class CryptoRandom : Random
-{
-    public override int Next(int maxValue) => RandomNumberGenerator.GetInt32(maxValue);
-    public override int Next(int minValue, int maxValue) => RandomNumberGenerator.GetInt32(minValue, maxValue);
-}
 public sealed class Session
 {
     public string Token, Name, WalletId;
@@ -37,9 +32,10 @@ public sealed class Room
     public bool AnnouncedComplete;
     public int ArchivedHandNumber = -1;
     public int BuyIn => Game.BigBlind * 100;
-    public Room(string id, string name, int small, int big)
+    public Room(string id, string name, int small, int big, IHandAudit audit)
     {
-        Id = id; Name = name; Game = new Game(new CryptoRandom(), 0, 6) { SmallBlind = small, BigBlind = big };
+        Id = id; Name = name; Game = new Game(new SecureShuffleRandom(), 0, 6,
+            audit ?? throw new ArgumentNullException(nameof(audit))) { SmallBlind = small, BigBlind = big };
     }
     public LobbyRow Lobby() => new() { id = Id, name = Name, smallBlind = Game.SmallBlind, bigBlind = Game.BigBlind, buyIn = BuyIn, occupied = Seats.Count(s => s != null) + ReservedSeats.Count(reserved => reserved), available = Enumerable.Range(0, Seats.Length).Count(i => Seats[i] == null && !ReservedSeats[i]), maxSeats = 6 };
     public TableState View(Session viewer, DateTime now)
@@ -90,21 +86,30 @@ public sealed class Hub
 {
     readonly object gate = new();
     readonly WalletStore wallets;
-    public readonly Room[] Rooms = { new("micro", "The Green Room", 1, 2), new("standard", "Drawmaha Social", 5, 10), new("deep", "The High Table", 25, 50) };
+    public readonly Room[] Rooms;
     readonly Dictionary<string, Session> sessions = new();
     public readonly string Epoch = Guid.NewGuid().ToString("N");
     readonly string accessKey;
     readonly int actionSeconds, showdownSeconds, reconnectSeconds;
     int connections;
-    public Hub(WalletStore wallets, string accessKey = null, int actionSeconds = 30, int showdownSeconds = 6, int reconnectSeconds = 90)
+    public Hub(WalletStore wallets, HandAuditStore audit, string accessKey = null, int actionSeconds = 30, int showdownSeconds = 6, int reconnectSeconds = 90)
     {
         this.wallets = wallets;
+        Rooms = new[] { new Room("micro", "The Green Room", 1, 2, TimedAudit(audit.ForTable("micro"))),
+            new Room("standard", "Drawmaha Social", 5, 10, TimedAudit(audit.ForTable("standard"))),
+            new Room("deep", "The High Table", 25, 50, TimedAudit(audit.ForTable("deep"))) };
         this.accessKey = accessKey ?? Environment.GetEnvironmentVariable("DRAWMAHA_ACCESS_KEY") ?? "";
         this.actionSeconds = Setting("DRAWMAHA_ACTION_SECONDS", actionSeconds, 2, 120);
         this.showdownSeconds = Setting("DRAWMAHA_SHOWDOWN_SECONDS", showdownSeconds, 1, 30);
         this.reconnectSeconds = Setting("DRAWMAHA_RECONNECT_SECONDS", reconnectSeconds, 2, 600);
         if (Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") == "Production" && this.accessKey.Length < 16) throw new InvalidOperationException("Production requires a DRAWMAHA_ACCESS_KEY of at least 16 characters.");
     }
+    IHandAudit TimedAudit(IHandAudit sink) => new DeadlineAwareAudit(sink, delay =>
+    {
+        // Audit writes run under gate: no table can process commands during this delay.
+        foreach (var room in Rooms)
+            if (room.Game.Actor >= 0) room.Deadline = room.Deadline.Add(delay);
+    });
     static int Setting(string name, int fallback, int min, int max) => int.TryParse(Environment.GetEnvironmentVariable(name), out int value) ? Math.Clamp(value, min, max) : fallback;
     public bool TryReserveConnection() { lock (gate) { if (connections >= 64) return false; connections++; return true; } }
     public void ReleaseConnection() { lock (gate) connections--; }
@@ -170,6 +175,7 @@ public sealed class Hub
                 else
                 {
                     var room = s.Room ?? throw new InvalidOperationException("Join a table first.");
+                    if (room.Game.Faulted) throw new InvalidOperationException("Table paused: secure hand recording failed.");
                     if (command.tableId != room.Id) throw new InvalidOperationException("Wrong table.");
                     if (command.type == "leave")
                     {
@@ -185,6 +191,7 @@ public sealed class Hub
                         if (player.Stack != 0 || (player.InHand && room.Game.Stage != Street.Complete)) throw new InvalidOperationException("Rebuy is available between hands.");
                         wallets.Rebuy(s.WalletId, room.Id, room.BuyIn);
                         player.Stack = room.BuyIn; player.Action = "Rebuy";
+                        room.Game.RecordSeatUpdate(s.Seat, "rebuy");
                         WalletChanged(s);
                         Changed(room, now); LobbyChanged();
                     }
@@ -258,6 +265,10 @@ public sealed class Hub
                 if (s.Commands.Count > 64) s.Seen.Remove(s.Commands.Dequeue());
                 peer.Send(new Envelope { type = "ack", id = command.id });
             }
+            catch (AuditFailureException)
+            {
+                if (s.Room != null) NotifyAuditFailure(s.Room);
+            }
             catch (Exception e) when (e is ArgumentException || e is InvalidOperationException)
             {
                 peer.Send(new Envelope { type = "error", message = e.Message, id = command.id });
@@ -271,6 +282,7 @@ public sealed class Hub
         if (s.Room != null) throw new InvalidOperationException("Leave your current table first.");
         var entry = ParseEntry(command.entryMode);
         var room = Rooms.FirstOrDefault(r => r.Id == command.tableId) ?? throw new ArgumentException("Unknown table.");
+        if (room.Game.Faulted) throw new InvalidOperationException("Table paused: secure hand recording failed.");
         int seat = -1;
         for (int i = 0; i < room.Seats.Length; i++) if (room.Seats[i] == null && !room.ReservedSeats[i]) { seat = i; break; }
         if (seat < 0) throw new InvalidOperationException("Table is full.");
@@ -279,6 +291,7 @@ public sealed class Hub
         s.CheckFold = false; s.AutoCallAmount = -1; s.LockedDrawHand = -1; s.LockedDiscards = null;
         room.Seats[seat] = s; var p = room.Game.Players[seat]; p.Name = s.Name; p.Stack = room.BuyIn; p.Bet = p.Contributed = p.DrawCount = p.Payout = 0; p.Folded = p.InHand = p.Scoop = false; p.Action = ""; p.Cards.Clear();
         room.Game.Note(s.Name + " joins seat " + (seat + 1) + (entry == EntryMode.PostBigBlind ? " · post big blind" : " · wait for big blind"));
+        room.Game.RecordSeatUpdate(seat, "join");
         WalletChanged(s);
         Changed(room, now); LobbyChanged();
     }
@@ -289,6 +302,7 @@ public sealed class Hub
         int balance = wallets.CashOut(s.WalletId, room.Id, player.Stack);
         room.ReservedSeats[s.Seat] = reserveSeat;
         room.Seats[s.Seat] = null; player.Stack = 0; player.Cards.Clear(); player.InHand = false;
+        room.Game.RecordSeatUpdate(s.Seat, "leave");
         if (!room.Seats.Any(seat => seat != null)) { room.CompletedHands.Clear(); room.ArchivedHandNumber = -1; }
         s.Room = null; s.Seat = -1; s.Leaving = s.LeaveRequested = false;
         s.CheckFold = false; s.AutoCallAmount = -1; s.LockedDrawHand = -1; s.LockedDiscards = null;
@@ -306,12 +320,12 @@ public sealed class Hub
     }
     void AfterAction(Room room, DateTime now)
     {
-        room.Deadline = now.AddSeconds(actionSeconds);
+        room.Deadline = DateTime.UtcNow.AddSeconds(actionSeconds);
         if (room.Game.Stage == Street.Complete)
         {
             CheckpointStacks(room);
             ArchiveCompletedHand(room);
-            if (!room.AnnouncedComplete) { room.AnnouncedComplete = true; room.NextHand = now.AddSeconds(showdownSeconds); }
+            if (!room.AnnouncedComplete) { room.AnnouncedComplete = true; room.NextHand = DateTime.UtcNow.AddSeconds(showdownSeconds); }
         }
     }
     void CheckpointStacks(Room room)
@@ -418,6 +432,9 @@ public sealed class Hub
         {
             foreach (var room in Rooms)
             {
+                if (room.Game.Faulted) continue;
+                try
+                {
                 foreach (var s in room.Seats.Where(s => s != null && s.Peer == null && (now - s.LastSeen).TotalSeconds >= reconnectSeconds)) s.Leaving = true;
                 if (room.Game.Actor >= 0)
                 {
@@ -474,14 +491,31 @@ public sealed class Hub
                 }
                 room.Game.StartHand(plan); room.Orbit.Commit(plan); room.AnnouncedComplete = false;
                 AfterAction(room, now); Changed(room, now);
+                }
+                catch (AuditFailureException)
+                {
+                    NotifyAuditFailure(room);
+                }
             }
             foreach (var pair in sessions.Where(p => p.Value.Peer == null && p.Value.Room == null && (now - p.Value.LastSeen).TotalMinutes > 20).ToArray()) sessions.Remove(pair.Key);
         }
     }
+    public void RecordShutdown()
+    {
+        lock (gate)
+            foreach (var room in Rooms)
+                try { room.Game.RecordInterruption("server-shutdown"); }
+                catch (AuditFailureException) { /* The table is already paused. */ }
+    }
+    static void NotifyAuditFailure(Room room)
+    {
+        foreach (var session in room.Seats)
+            session?.Peer?.Send(new Envelope { type = "error", message = "Table paused: secure hand recording failed." });
+    }
     void Changed(Room room, DateTime now)
     {
         room.Revision++;
-        foreach (var s in room.Seats) if (s?.Peer != null) s.Peer.Send(new Envelope { type = "state", table = room.View(s, now) });
+        foreach (var s in room.Seats) if (s?.Peer != null) s.Peer.Send(new Envelope { type = "state", table = room.View(s, DateTime.UtcNow) });
     }
     void LobbyChanged() { var rows = Rooms.Select(r => r.Lobby()).ToArray(); foreach (var s in sessions.Values) s.Peer?.Send(new Envelope { type = "lobby", tables = rows }); }
 }

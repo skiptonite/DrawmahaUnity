@@ -1,4 +1,20 @@
-# Verification performed — multiplayer update
+# RNG and audit verification — 2026-10-17
+
+- Server build: zero warnings and zero errors on .NET 10.
+- Core suite: **113,729 assertions**, exhaustive evaluation of all 2,598,960 five-card hands and 1,500 simulated hands.
+- RNG/audit suite: **81 checks** covering shuffle bounds, fixed-deck exhaustion, maximum 50-card consumption, burns, encryption round-trip, incorrect keys, altered/deleted/reordered records, missing closing markers, replay mismatch, failure before payment, frozen games, and deadline compensation.
+- Six-client multiplayer smoke test: **1,840 assertions**, including authorization, joins, rejected illegal actions, duplicate commands, two-card draws, showdown, reconnects, wallet transfers and per-recipient card privacy.
+- The real multiplayer server's encrypted audit authenticated successfully and replayed **four settled hands**. The local runner deliberately terminates its child server, so this inspection uses `--allow-open` and does not assert stream completeness. Closed-stream validation is covered by the standalone audit suite.
+- Statistical diagnostic: **100,000 decks** from the production random source; all decks were valid permutations. Aggregate card-position chi-square 2727.91168; adjacency chi-square 2606.09352; consecutive-deck same-position matches 100362 (expectation 99999). These are diagnostic observations, not a certification or a statistical proof of fairness.
+- Azure PowerShell scripts parsed successfully. Azure deployment, remote Table Storage persistence, Unity Editor compilation and independent lab certification were not performed.
+
+Run `python Verification/local_multiplayer_check.py` after building the server to repeat the isolated local multiplayer check and audit replay. See [RNG_AND_AUDITS.md](../RNG_AND_AUDITS.md) for the remaining commands and deployment settings.
+
+---
+
+# Historical verification — multiplayer update
+
+The following notes predate the current two-discard limit and fixed-deck implementation. Claims about five-card draws and recycling describe the older implementation.
 
 Date: 2026-10-06 (UTC)
 

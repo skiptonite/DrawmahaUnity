@@ -2,6 +2,8 @@
 
 Six human seats per table. No bots. The server shuffles, deals, validates actions, controls turn order, handles blinds and entry, and awards pots. A Unity client receives only its own private cards until a real showdown.
 
+The server uses cryptographic Fisher–Yates shuffles and a fixed deck per hand. Encrypted, tamper-evident hand audits are required for multiplayer. Local development creates an ignored audit folder automatically; production uses durable Azure Table Storage and a separate audit-key secret. See [randomness, audit configuration and verification](RNG_AND_AUDITS.md).
+
 ## Quick local start
 
 1. Install **Unity 6** and the **.NET 10 SDK**. Add this project folder through Unity Hub.

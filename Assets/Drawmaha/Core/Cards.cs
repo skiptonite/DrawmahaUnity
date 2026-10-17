@@ -22,30 +22,29 @@ namespace Drawmaha
     {
         readonly List<Card> cards = new List<Card>();
         int cursor;
-        readonly List<Card> muck = new List<Card>();
-        readonly Random random;
-        public Deck(Random random)
+        readonly Action<string, Card[], int> audit;
+        public int Remaining { get { return cards.Count - cursor; } }
+        public Deck(IRandomSource random, Action<string, Card[], int> audit = null)
         {
-            this.random = random;
+            if (random == null) throw new ArgumentNullException("random");
+            this.audit = audit;
             for (int s = 0; s < 4; s++) for (int r = 2; r <= 14; r++) cards.Add(new Card(r, s));
             for (int i = cards.Count - 1; i > 0; i--)
             {
-                int j = random.Next(i + 1); Card c = cards[i]; cards[i] = cards[j]; cards[j] = c;
+                int j = random.NextBelow(i + 1);
+                if (j < 0 || j > i) throw new InvalidOperationException("Random source returned an out-of-range value.");
+                Card c = cards[i]; cards[i] = cards[j]; cards[j] = c;
             }
+            if (audit != null) audit("shuffle", cards.ToArray(), -1);
         }
-        public void Discard(Card card) { muck.Add(card); }
-        public void Burn() { Discard(Take()); }
-        public Card Take(ICollection<Card> forbidden = null)
+        public void Burn() { TakeCard("burn"); }
+        public Card Take() { return TakeCard("deal"); }
+        Card TakeCard(string kind)
         {
-            if (cursor >= cards.Count)
-            {
-                cards.Clear(); cards.AddRange(muck); muck.Clear(); cursor = 0;
-                for (int i = cards.Count - 1; i > 0; i--) { int j = random.Next(i + 1); Card c = cards[i]; cards[i] = cards[j]; cards[j] = c; }
-            }
-            int available = cursor;
-            while (available < cards.Count && forbidden != null && forbidden.Contains(cards[available])) available++;
-            if (available == cards.Count) throw new InvalidOperationException("No eligible replacement cards.");
-            Card result = cards[available]; cards[available] = cards[cursor]; cards[cursor++] = result;
+            if (cursor >= cards.Count) throw new InvalidOperationException("Fixed deck exhausted. Cards must never be recycled.");
+            Card result = cards[cursor];
+            if (audit != null) audit(kind, new[] { result }, cursor);
+            cursor++;
             return result;
         }
     }

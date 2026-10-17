@@ -64,10 +64,25 @@ try {
     Write-Host 'Make sure every table is empty before continuing.'
     if ((Read-Host 'Type EMPTY to deploy') -cne 'EMPTY') { throw 'Deployment cancelled. The running app was not updated.' }
 
+    # Preserve the audit key across revisions so historical hands remain decryptable.
+    $secretNames = Invoke-Azure -Arguments @('containerapp', 'show', '--name', $AppName, '--resource-group', $ResourceGroupName,
+        '--query', 'properties.configuration.secrets[].name', '--output', 'tsv')
+    if ($secretNames -notcontains 'audit-key') {
+        $auditKeyBytes = New-Object byte[] 32
+        $auditGenerator = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+        try {
+            $auditGenerator.GetBytes($auditKeyBytes)
+            $plainAuditKey = [Convert]::ToBase64String($auditKeyBytes)
+            $null = Invoke-Azure -Arguments @('containerapp', 'secret', 'set', '--name', $AppName, '--resource-group', $ResourceGroupName,
+                '--secrets', "audit-key=$plainAuditKey", '--output', 'none')
+        }
+        finally { $auditGenerator.Dispose(); [Array]::Clear($auditKeyBytes, 0, $auditKeyBytes.Length); $plainAuditKey = $null }
+    }
+
     $image = "$registryServer/drawmaha:$tag"
     Write-Host "Updating '$AppName' to $image"
     $null = Invoke-Azure -Arguments @('containerapp', 'update', '--name', $AppName, '--resource-group', $ResourceGroupName,
-        '--image', $image, '--min-replicas', '1', '--max-replicas', '1')
+        '--image', $image, '--min-replicas', '1', '--max-replicas', '1', '--set-env-vars', 'DRAWMAHA_AUDIT_KEY=secretref:audit-key')
 
     $healthUrl = "https://$fqdn/health"
     $healthy = $false
