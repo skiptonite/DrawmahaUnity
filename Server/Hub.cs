@@ -18,6 +18,7 @@ public sealed class Session
     public EntryMode Entry;
     public readonly Queue<string> Commands = new();
     public readonly HashSet<string> Seen = new();
+    public readonly Queue<DateTime> ChatSentAt = new();
 }
 public sealed class Room
 {
@@ -27,6 +28,8 @@ public sealed class Room
     public readonly bool[] ReservedSeats = new bool[6];
     public readonly BlindOrbit Orbit = new();
     public readonly List<HandHistoryView> CompletedHands = new();
+    public readonly List<ChatMessageView> ChatMessages = new();
+    public long ChatSequence;
     public long Revision;
     public DateTime Deadline, NextHand;
     public bool AnnouncedComplete;
@@ -151,7 +154,7 @@ public sealed class Hub
             s.Peer = peer; s.LastSeen = DateTime.UtcNow; peer.Session = s;
             peer.Send(new Envelope { type = "welcome", token = s.Token, epoch = Epoch, protocol = WireProtocol.Current, walletBalance = walletBalance });
             peer.Send(new Envelope { type = "lobby", tables = Rooms.Select(r => r.Lobby()).ToArray() });
-            if (s.Room != null) Changed(s.Room, DateTime.UtcNow);
+            if (s.Room != null) { Changed(s.Room, DateTime.UtcNow); SendChatHistory(s); }
         }
     }
     public void Handle(Peer peer, Command command)
@@ -177,7 +180,8 @@ public sealed class Hub
                     var room = s.Room ?? throw new InvalidOperationException("Join a table first.");
                     if (room.Game.Faulted) throw new InvalidOperationException("Table paused: secure hand recording failed.");
                     if (command.tableId != room.Id) throw new InvalidOperationException("Wrong table.");
-                    if (command.type == "leave")
+                    if (command.type == "chat") SendChat(s, command.message, now);
+                    else if (command.type == "leave")
                     {
                         Player player = room.Game.Players[s.Seat];
                         bool handInProgress = room.Game.Stage != Street.Waiting && room.Game.Stage != Street.Complete;
@@ -277,6 +281,24 @@ public sealed class Hub
         }
     }
     static EntryMode ParseEntry(string entry) => entry == "post" ? EntryMode.PostBigBlind : entry == "wait" ? EntryMode.WaitForBigBlind : throw new ArgumentException("Choose post or wait.");
+    static void SendChatHistory(Session session) => session.Peer?.Send(new Envelope {
+        type = "chatHistory", tableId = session.Room.Id, chatMessages = session.Room.ChatMessages.ToArray()
+    });
+    static void SendChat(Session sender, string text, DateTime now)
+    {
+        string message = ChatRules.Validate(text);
+        while (sender.ChatSentAt.Count > 0 && (now - sender.ChatSentAt.Peek()).TotalSeconds >= 10) sender.ChatSentAt.Dequeue();
+        if (sender.ChatSentAt.Count >= 5) throw new InvalidOperationException("Chat is moving too quickly. Please wait a few seconds.");
+        sender.ChatSentAt.Enqueue(now);
+        Room room = sender.Room;
+        var entry = new ChatMessageView { sequence = ++room.ChatSequence,
+            sentUnixMs = new DateTimeOffset(now, TimeSpan.Zero).ToUnixTimeMilliseconds(), username = sender.Name, message = message };
+        room.ChatMessages.Add(entry);
+        if (room.ChatMessages.Count > ChatRules.HistoryLimit) room.ChatMessages.RemoveAt(0);
+        foreach (var session in room.Seats)
+            session?.Peer?.Send(new Envelope { type = "chat", tableId = room.Id, chat = entry });
+        // Chat deliberately does not mutate the game revision, actor or action deadline.
+    }
     void Join(Session s, Command command, DateTime now)
     {
         if (s.Room != null) throw new InvalidOperationException("Leave your current table first.");
@@ -294,6 +316,7 @@ public sealed class Hub
         room.Game.RecordSeatUpdate(seat, "join");
         WalletChanged(s);
         Changed(room, now); LobbyChanged();
+        SendChatHistory(s);
     }
     void Remove(Session s, bool reserveSeat = false)
     {
@@ -303,7 +326,7 @@ public sealed class Hub
         room.ReservedSeats[s.Seat] = reserveSeat;
         room.Seats[s.Seat] = null; player.Stack = 0; player.Cards.Clear(); player.InHand = false;
         room.Game.RecordSeatUpdate(s.Seat, "leave");
-        if (!room.Seats.Any(seat => seat != null)) { room.CompletedHands.Clear(); room.ArchivedHandNumber = -1; }
+        if (!room.Seats.Any(seat => seat != null)) { room.CompletedHands.Clear(); room.ArchivedHandNumber = -1; room.ChatMessages.Clear(); }
         s.Room = null; s.Seat = -1; s.Leaving = s.LeaveRequested = false;
         s.CheckFold = false; s.AutoCallAmount = -1; s.LockedDrawHand = -1; s.LockedDiscards = null;
         s.Peer?.Send(new Envelope { type = "wallet", walletBalance = balance });

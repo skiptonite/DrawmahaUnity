@@ -4,6 +4,8 @@ Six human seats per table. No bots. The server shuffles, deals, validates action
 
 The server uses cryptographic Fisher–Yates shuffles and a fixed deck per hand. Encrypted, tamper-evident hand audits are required for multiplayer. Local development creates an ignored audit folder automatically; production uses durable Azure Table Storage and a separate audit-key secret. See [randomness, audit configuration and verification](RNG_AND_AUDITS.md).
 
+Table chat appears at the bottom left, matching the betting panel. Send with Enter or the Send button; messages allow up to 200 Unicode characters (an emoji surrogate pair counts as one). Chat is visible only to seated players at that table, retains the latest 30 messages across hands/reconnects, and clears when the table becomes empty. The server supplies the sender name, rejects empty/control-character messages, and limits each session to five messages per ten seconds. Chat does not change betting revisions or turn deadlines. Both server and client need protocol 8 for chat. Run `python Verification/local_multiplayer_check.py --chat` after building the server to verify the feature locally.
+
 ## Quick local start
 
 1. Install **Unity 6** and the **.NET 10 SDK**. Add this project folder through Unity Hub.
@@ -16,11 +18,29 @@ The server uses cryptographic Fisher–Yates shuffles and a fixed deck per hand.
 
    A development server permits an empty invite key. To require one, set `DRAWMAHA_ACCESS_KEY` before starting it. Production refuses to start without a key of at least 16 characters.
 3. In Unity, choose **Tools → Drawmaha → Open Table**, then press Play.
-4. On the connect screen, enter a username and invite code. The default server address is the deployed Azure server; after connecting, choose a table in the lobby. To test a local server, change the address to `ws://localhost:8080/ws`.
-5. Build a Windows client using **Tools → Drawmaha → Build Windows Client**. For multiplayer testing, use a second machine; multiple instances from the same installation share its guest identity and reconnect session.
+4. On the connect screen, enter a username and invite code. The default server address is the deployed Azure server; after connecting, choose a table in the lobby. To use a local server, pass `-drawmaha-server ws://127.0.0.1:8080/ws` when launching the client.
+5. Build a Windows client using **Tools → Drawmaha → Build Windows Client**. To test two players on one computer, use **Tools → Drawmaha → Testing → Build and Launch Two Windows Players**.
 6. With two seated, connected players, the first hand starts automatically. Later hands start six seconds after settlement. New arrivals wait for the next eligible hand.
 
 Each guest wallet starts with 10,000 play chips by default. The bank is tied to one locally saved guest identity per server and app installation; the display name can change without creating another wallet. Joining deducts the table buy-in; leaving returns the remaining stack. The bank is stored on the server, not in PlayerPrefs. Existing installations migrate the wallet for the display name entered at first connect after updating. There is no in-game reset option. Clearing saved client data or reinstalling may still create a new guest identity, so this is not a strong one-person/one-account guarantee.
+
+## Two players on one computer
+
+Two ordinary launches share the normal player's saved wallet/reconnect token. Different display names alone do not create independent players. Test profiles give each window its own saved name, wallet and reconnect token without touching the normal profile. Profiles retain their identity between launches. They use the same server validation and permissions as any other guest, and are not bots.
+
+- **Easiest:** choose **Tools → Drawmaha → Testing → Build and Launch Two Windows Players** in Unity. It builds the current client and opens two windowed copies, prefilled as Test Player 1 and Test Player 2. Enter the invite code in each, connect both, and join the same table. Both connect to the configured Azure server by default. If both profiles have previously been renamed, give them different display names before connecting.
+- **Already built:** choose **Tools → Drawmaha → Testing → Launch Two Windows Players**, or run `./Verification/launch-two-clients.ps1` from PowerShell.
+- **Local server:** start the Development server from step 2 above, then run `./Verification/launch-two-clients.ps1 -LocalServer`. Use an empty invite code unless you configured `DRAWMAHA_ACCESS_KEY`. No Azure deployment is needed for this route.
+- **Editor plus one build:** stop Play mode, choose **Tools → Drawmaha → Testing → Editor Identity → Test Player 1**, then press Play. Launch the standalone client with `-drawmaha-test-player 2`. Choose **Normal Player** in that menu to switch the editor back afterward. Do not use the same test profile in both windows.
+
+Manual Windows launch example (run each command once):
+
+```powershell
+Start-Process ./Builds/Windows/Drawmaha.exe -ArgumentList '-drawmaha-test-player 1 -screen-fullscreen 0 -screen-width 960 -screen-height 540'
+Start-Process ./Builds/Windows/Drawmaha.exe -ArgumentList '-drawmaha-test-player 2 -screen-fullscreen 0 -screen-width 960 -screen-height 540'
+```
+
+Profiles 1–6 are supported for testing a full table; profile 0 is the existing normal player. Appearance preferences remain shared. The game already runs in the background, so switching between windows does not stop play or pause turn timers. Rebuild older executables before using these options.
 
 For a friend on another computer, build the matching client with **Tools → Drawmaha → Build Windows Client** or **Tools → Drawmaha → Build macOS Client**. For macOS, install **macOS Build Support** for this Unity Editor in Unity Hub first. The macOS build outputs `Builds/macOS/Drawmaha.app` and creates a ready-to-upload `Builds/Drawmaha-macOS.zip` with executable permissions preserved. Attach that ZIP to a GitHub Release. On first launch, macOS may warn that the app is from an unidentified developer; for a private test, Control-click the app, choose **Open**, then confirm. Your friend enters their own username and the invite code you share privately. The client defaults to the deployed Azure server. Remote connections require `wss://`; unencrypted `ws://` is allowed only for loopback testing. See [AZURE_SETUP.md](AZURE_SETUP.md) for server deployment and updates.
 

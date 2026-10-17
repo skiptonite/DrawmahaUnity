@@ -43,7 +43,7 @@ Budget for the Container App **plus** Basic registry storage, the Storage accoun
    ```
 
    Replace the registry example with your own available name. The script prompts securely for an invite key; it creates billable resources only when **you run it**. It also creates a uniquely named wallet Storage account automatically. To choose its globally unique name, pass `-StorageAccountName <3-24-lowercase-letters-or-digits>`. It builds the image remotely with `az acr build`; Docker Desktop is not required for that route. If your subscription does not allow ACR Tasks/builds, build `Server/Dockerfile` locally with Docker, tag it for your registry, and push it instead.
-4. The script prints a `wss://<hostname>/ws` client address and `https://<hostname>/health` health URL. Check that health returns `{"status":"ok","protocol":7}`.
+4. The script prints a `wss://<hostname>/ws` client address and `https://<hostname>/health` health URL. Check that health returns `{"status":"ok","protocol":8}`.
 5. Configure the generated `wss://` address as the client's default endpoint in `Assets/Drawmaha/Runtime/TableView.cs`, then build and distribute the client. Players enter the invite key and a display name on the connect screen; the lobby appears after connecting. Each installation keeps one guest identity per server, and changing the display name keeps the same wallet. The endpoint is no longer loaded from PlayerPrefs, so the configured build default is always used. The invite is not saved in the distributed game or PlayerPrefs; guest identity and reconnect token are saved locally per server.
 6. Verify the Azure portal shows Consumption, min/max 1, single revision, target port 8080, and insecure ingress disabled. Set your budget alert.
 

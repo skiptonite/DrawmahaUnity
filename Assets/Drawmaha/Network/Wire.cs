@@ -4,14 +4,15 @@ namespace Drawmaha.Network
 {
     public static class WireProtocol
     {
-        public const int Current = 7;
+        public const int Current = 8;
+        public const int TableChat = 8;
         public const int WaitingPreferences = 5;
         public const int MainBank = 7;
     }
 
     [Serializable] public class Command
     {
-        public string type, username, token, walletId, accessKey, tableId, entryMode, id;
+        public string type, username, token, walletId, accessKey, tableId, entryMode, id, message;
         public int avatar, raiseTo, hand;
         public long revision;
         public bool enabled;
@@ -24,6 +25,55 @@ namespace Drawmaha.Network
         public int protocol, walletBalance;
         public LobbyRow[] tables;
         public TableState table;
+        public string tableId;
+        public ChatMessageView chat;
+        public ChatMessageView[] chatMessages;
+    }
+    public static class ChatRules
+    {
+        public const int MaxCharacters = 200;
+        public const int HistoryLimit = 30;
+        public static int CharacterCount(string value)
+        {
+            int count = 0;
+            for (int i = 0; i < (value ?? "").Length; i++, count++)
+                if (char.IsHighSurrogate(value[i]) && i + 1 < value.Length && char.IsLowSurrogate(value[i + 1])) i++;
+            return count;
+        }
+        public static string LimitInput(string value)
+        {
+            value = value ?? "";
+            int i = 0, count = 0;
+            for (; i < value.Length && count < MaxCharacters; i++, count++)
+                if (char.IsHighSurrogate(value[i]) && i + 1 < value.Length && char.IsLowSurrogate(value[i + 1])) i++;
+            if (i > 0 && char.IsHighSurrogate(value[i - 1])) i--;
+            return value.Substring(0, i);
+        }
+        public static string Validate(string value)
+        {
+            if (value == null) throw new ArgumentException("Enter a chat message.");
+            // Reject invalid Unicode and hidden line breaks rather than changing the message.
+            for (int i = 0; i < value.Length; i++)
+            {
+                char c = value[i];
+                if (char.IsControl(c) || c == '\u2028' || c == '\u2029')
+                    throw new ArgumentException("Chat messages must use a single line without control characters.");
+                if (char.IsHighSurrogate(c))
+                {
+                    if (i + 1 >= value.Length || !char.IsLowSurrogate(value[++i])) throw new ArgumentException("Invalid chat text.");
+                }
+                else if (char.IsLowSurrogate(c)) throw new ArgumentException("Invalid chat text.");
+            }
+            if (CharacterCount(value) > MaxCharacters) throw new ArgumentException("Chat messages are limited to 200 characters.");
+            value = value.Trim();
+            if (value.Length == 0) throw new ArgumentException("Enter a chat message.");
+            return value;
+        }
+    }
+    [Serializable] public class ChatMessageView
+    {
+        public long sequence, sentUnixMs;
+        public string username, message;
     }
     [Serializable] public class LobbyRow
     {

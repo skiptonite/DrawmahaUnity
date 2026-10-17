@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Net.WebSockets;
 using System.Text;
 using System.Threading;
@@ -16,6 +17,11 @@ namespace Drawmaha.Network
         public int ServerProtocol { get; private set; }
         public bool SupportsWaitingPreferences { get { return ServerProtocol >= WireProtocol.WaitingPreferences; } }
         public bool SupportsMainBank { get { return ServerProtocol >= WireProtocol.MainBank; } }
+        public bool SupportsTableChat { get { return ServerProtocol >= WireProtocol.TableChat; } }
+        readonly List<ChatMessageView> chatMessages = new List<ChatMessageView>();
+        public IReadOnlyList<ChatMessageView> ChatMessages { get { return chatMessages; } }
+        public bool ChatPending { get { return pendingChatId != null; } }
+        public event Action<string> ChatConfirmed;
         public string Status { get; private set; } = "Not connected";
         public TableState Table { get; private set; }
         public LobbyRow[] Tables { get; private set; } = new LobbyRow[0];
@@ -29,13 +35,15 @@ namespace Drawmaha.Network
         ClientWebSocket socket;
         CancellationTokenSource cancel;
         string username, accessKey, token, walletId, pendingId, epoch;
+        string pendingChatId, pendingChatText;
+        float pendingChatAt;
         int avatar, generation;
         float heartbeat, pendingAt;
         bool wantConnection, connectInProgress;
         float reconnectAt;
         public int BankBalance { get; private set; }
-        string TokenKey { get { return "drawmaha.token." + Endpoint; } }
-        string WalletKey { get { return "drawmaha.wallet.id." + Endpoint; } }
+        string TokenKey { get { return LocalTestPlayer.Key("drawmaha.token." + Endpoint); } }
+        string WalletKey { get { return LocalTestPlayer.Key("drawmaha.wallet.id." + Endpoint); } }
         string LegacyTokenKey { get { return TokenKey + "." + (username ?? "").ToLowerInvariant(); } }
         string LegacyWalletKey { get { return WalletKey + "." + (username ?? "").ToLowerInvariant(); } }
         public void Connect(string endpoint, string name, int avatarIndex, string invite)
@@ -45,10 +53,10 @@ namespace Drawmaha.Network
             walletId = PlayerPrefs.GetString(WalletKey, "");
             if (!Guid.TryParseExact(walletId, "N", out _))
             {
-                walletId = PlayerPrefs.GetString(LegacyWalletKey, "");
+                walletId = LocalTestPlayer.Number == 0 ? PlayerPrefs.GetString(LegacyWalletKey, "") : "";
                 if (!Guid.TryParseExact(walletId, "N", out _)) walletId = Guid.NewGuid().ToString("N");
             }
-            if (string.IsNullOrEmpty(token)) token = PlayerPrefs.GetString(LegacyTokenKey, "");
+            if (LocalTestPlayer.Number == 0 && string.IsNullOrEmpty(token)) token = PlayerPrefs.GetString(LegacyTokenKey, "");
             PlayerPrefs.SetString(WalletKey, walletId); PlayerPrefs.Save();
             BankBalance = 0; wantConnection = true; BeginConnect();
         }
@@ -99,7 +107,7 @@ namespace Drawmaha.Network
             string message;
             while (notices.TryDequeue(out message))
             {
-                if (message == "closed") { Connected = false; connectInProgress = false; pendingId = null; reconnectAt = Time.unscaledTime + 3; }
+                if (message == "closed") { Connected = false; connectInProgress = false; pendingId = pendingChatId = null; reconnectAt = Time.unscaledTime + 3; }
                 else Status = message;
             }
             while (inbox.TryDequeue(out message))
@@ -111,16 +119,36 @@ namespace Drawmaha.Network
                     {
                         bool changed = epoch != null && epoch != packet.epoch;
                         epoch = packet.epoch; token = packet.token; ServerProtocol = packet.protocol; BankBalance = packet.walletBalance;
-                        PlayerPrefs.SetString(TokenKey, token); PlayerPrefs.DeleteKey(LegacyTokenKey); PlayerPrefs.DeleteKey(LegacyWalletKey); PlayerPrefs.Save();
+                        PlayerPrefs.SetString(TokenKey, token);
+                        if (LocalTestPlayer.Number == 0) { PlayerPrefs.DeleteKey(LegacyTokenKey); PlayerPrefs.DeleteKey(LegacyWalletKey); }
+                        PlayerPrefs.Save();
                         Connected = true; connectInProgress = false;
                         Status = !SupportsWaitingPreferences ? "Server update required for waiting-action preferences." : !SupportsMainBank ? "Server update required for the main bank." : changed ? "Server restarted. Tables were reset." : "Connected";
-                        if (changed) Table = null;
+                        if (changed) { Table = null; chatMessages.Clear(); }
                         heartbeat = Time.unscaledTime + 15;
                     }
                     else if (packet.type == "wallet") BankBalance = packet.walletBalance;
                     else if (packet.type == "lobby") Tables = packet.tables ?? new LobbyRow[0];
-                    else if (packet.type == "state") { Table = packet.table; StateReceivedAt = Time.unscaledTime; StateChanged?.Invoke(Table); }
-                    else if (packet.type == "left") { Table = null; pendingId = null; }
+                    else if (packet.type == "state")
+                    {
+                        if (Table == null || Table.id != packet.table?.id) { chatMessages.Clear(); pendingChatId = null; }
+                        Table = packet.table; StateReceivedAt = Time.unscaledTime; StateChanged?.Invoke(Table);
+                    }
+                    else if (packet.type == "chatHistory" && Table != null && packet.tableId == Table.id)
+                    {
+                        chatMessages.Clear();
+                        foreach (var entry in packet.chatMessages ?? new ChatMessageView[0]) AddChat(entry);
+                    }
+                    else if (packet.type == "chat" && Table != null && packet.tableId == Table.id) AddChat(packet.chat);
+                    else if (packet.type == "left") { Table = null; pendingId = pendingChatId = null; chatMessages.Clear(); }
+                    else if (packet.type == "ack" && pendingChatId != null && packet.id == pendingChatId)
+                    {
+                        string sent = pendingChatText; pendingChatId = null; ChatConfirmed?.Invoke(sent);
+                    }
+                    else if (packet.type == "error" && pendingChatId != null && packet.id == pendingChatId)
+                    {
+                        pendingChatId = null; Failure?.Invoke(packet.message);
+                    }
                     else if (packet.type == "ack" && packet.id == pendingId) pendingId = null;
                     else if (packet.type == "error" && (packet.id == pendingId || string.IsNullOrEmpty(packet.id)))
                     {
@@ -137,6 +165,26 @@ namespace Drawmaha.Network
                 pendingId = null; Status = "No action confirmation. Reconnecting for the current table state.";
                 socket?.Abort();
             }
+            if (pendingChatId != null && Time.unscaledTime - pendingChatAt > 8)
+            {
+                pendingChatId = null; Failure?.Invoke("Chat delivery was not confirmed. Check the chat before sending again.");
+            }
+        }
+        void AddChat(ChatMessageView entry)
+        {
+            if (entry == null || chatMessages.Exists(item => item.sequence == entry.sequence)) return;
+            chatMessages.Add(entry);
+            if (chatMessages.Count > ChatRules.HistoryLimit) chatMessages.RemoveAt(0);
+        }
+        public bool SendChat(string text)
+        {
+            if (!Connected || Table == null || !SupportsTableChat || ChatPending) return false;
+            try { text = ChatRules.Validate(text); }
+            catch (ArgumentException e) { Failure?.Invoke(e.Message); return false; }
+            pendingChatId = Guid.NewGuid().ToString("N"); pendingChatText = text; pendingChatAt = Time.unscaledTime;
+            var command = new Command { type = "chat", id = pendingChatId, tableId = Table.id, message = text };
+            _ = SendText(JsonUtility.ToJson(command), socket, cancel.Token, generation);
+            return true;
         }
         public void Send(Command command, bool track = true)
         {
@@ -173,7 +221,7 @@ namespace Drawmaha.Network
         public void Disconnect()
         {
             wantConnection = false; generation++; cancel?.Cancel(); socket?.Abort(); socket = null;
-            Connected = false; connectInProgress = false; pendingId = null;
+            Connected = false; connectInProgress = false; pendingId = pendingChatId = null; chatMessages.Clear();
             string ignored; while (inbox.TryDequeue(out ignored)) { } while (notices.TryDequeue(out ignored)) { }
             Status = "Not connected";
         }

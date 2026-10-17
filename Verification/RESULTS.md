@@ -1,3 +1,18 @@
+# Local test-player profiles — 2026-10-17
+
+- Verified in Unity that the normal wallet key stays unchanged, profiles 1 and 2 use different keys, command-line profile selection overrides the editor default, and invalid profile numbers are rejected.
+- Windows client rebuilt successfully with zero errors. Test launcher script parsed successfully. The two interactive windows were not automatically launched or connected to Azure.
+- Use **Tools → Drawmaha → Testing → Launch Two Windows Players** with the rebuilt client, or the build-and-launch menu for future source changes. See the two-player section in README.md for local-server and Editor-plus-build options.
+
+# Table chat verification — 2026-10-17
+
+- Server build: zero warnings/errors. Unity Editor compiled the chat scripts; the input limiter and Unicode counter ran successfully inside Unity.
+- Inspected the actual Game view: chat occupies the bottom-left corner and matches the betting panel's dimensions, background and rounded styling. It includes wrapped, scrollable messages, an input field, a 200-character counter, and a Send button. Enter submits while the chat field is focused.
+- **58 chat integration assertions passed** against a fresh local server: table/lobby isolation, server-controlled sender identity, empty/oversized/control-character rejection, exactly 200 ASCII characters and emoji accepted, stale game revisions allowed for chat, duplicate command IDs, burst limiting and recovery, history on reconnect, latest-30 retention, and history clearing on an empty table.
+- Multiplayer regression: **1,840 assertions passed**, and its encrypted audit replayed four settled hands. RNG/audit regression: **81 checks passed**. Core regression: **113,729 assertions passed**.
+- Test commands: `python Verification/local_multiplayer_check.py --chat` and `python Verification/local_multiplayer_check.py`, after building the server. Both use temporary local server processes; no Azure deployment was performed.
+- Chat requires protocol 8 on the server/client. Production storage behavior is unchanged: chat is bounded, in-memory table history, separate from encrypted card audits.
+
 # RNG and audit verification — 2026-10-17
 
 - Server build: zero warnings and zero errors on .NET 10.

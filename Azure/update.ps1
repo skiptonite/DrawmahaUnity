@@ -90,7 +90,7 @@ try {
     for ($attempt = 1; $attempt -le $HealthCheckAttempts; $attempt++) {
         try {
             $health = Invoke-RestMethod -Uri $healthUrl -Method Get -TimeoutSec 10
-            if ($health.status -eq 'ok' -and $health.protocol -eq 7) { $healthy = $true; break }
+            if ($health.status -eq 'ok' -and $health.protocol -eq 8) { $healthy = $true; break }
             $lastHealthError = "Unexpected health response: $($health | ConvertTo-Json -Compress)"
         }
         catch { $lastHealthError = $_.Exception.Message }

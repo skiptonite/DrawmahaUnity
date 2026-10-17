@@ -38,6 +38,11 @@ namespace Drawmaha
         bool? optimisticDrawLocked, optimisticCheckFold, optimisticCallQueued;
         int optimisticCallAmount = -1;
         Vector2 historyScroll, customizationScroll;
+        Vector2 chatScroll;
+        string chatDraft = "", chatTable = "";
+        long lastChatSequence = -1;
+        float chatContentHeight;
+        GUIStyle chatText, chatMeta, chatInput;
         int lastHand = -1, shownBoard, lastActor = -99, customizationTab;
         float handStarted, nextBoardAt, raiseTo, errorUntil, leaveNoticeUntil, turnTimerStartedAt, turnTimerDuration;
         string leaveNotice = "", raiseAmountText = "", drawHandLabel = "", omahaHandLabel = "";
@@ -88,9 +93,13 @@ namespace Drawmaha
             if (cardBacks.Length > 0) cardBack = cardBacks[cardBackIndex];
             cardFaceStyle = Mathf.Clamp(PlayerPrefs.GetInt("drawmaha.card.face.style", 0), 0, 2);
             holeCardOrderMode = Mathf.Clamp(PlayerPrefs.GetInt("drawmaha.hole.card.order", 0), 0, 2);
-            PlayerPrefs.DeleteKey("drawmaha.endpoint"); username = PlayerPrefs.GetString("drawmaha.username", "");
+            PlayerPrefs.DeleteKey("drawmaha.endpoint");
+            username = PlayerPrefs.GetString(LocalTestPlayer.Key("drawmaha.username"),
+                LocalTestPlayer.Number == 0 ? "" : "Test Player " + LocalTestPlayer.Number);
+            if (!string.IsNullOrWhiteSpace(LocalTestPlayer.ServerOverride)) endpoint = LocalTestPlayer.ServerOverride;
             network = gameObject.AddComponent<MultiplayerClient>();
             network.StateChanged += Received;
+            network.ChatConfirmed += sent => { if (chatDraft.Trim() == sent) chatDraft = ""; };
             network.Failure += s => { ClearOptimisticPreferences(); error = s; errorUntil = Time.unscaledTime + 8; };
 #if UNITY_EDITOR
             if (UnityEditor.EditorPrefs.GetBool("Drawmaha.VisualPreview", false))
@@ -378,6 +387,10 @@ namespace Drawmaha
             holeOrderTabButton.fontSize = FitButtonFontSize(holeOrderTabButton, "Hole Card Order", 154);
             holeOrderTabAccentButton = new GUIStyle(accentButton) { fontSize = holeOrderTabButton.fontSize };
             input = new GUIStyle(GUI.skin.textField); input.fontSize = 19; input.padding = new RectOffset(12, 12, 10, 8);
+            chatText = Style(16, Ink); chatText.clipping = TextClipping.Clip;
+            chatMeta = Style(14, Accent, FontStyle.Bold);
+            chatInput = new GUIStyle(input) { fontSize = 16, richText = false, alignment = TextAnchor.MiddleLeft };
+            chatInput.normal.textColor = Ink; chatInput.focused.textColor = Ink;
             betAmountStyle = new GUIStyle(input); betAmountStyle.fontSize = 27; betAmountStyle.alignment = TextAnchor.MiddleCenter;
             betSliderStyle = new GUIStyle(GUI.skin.horizontalSlider);
             betSliderThumbStyle = new GUIStyle(GUI.skin.horizontalSliderThumb)
@@ -434,7 +447,9 @@ namespace Drawmaha
                 Label(banner.x + 18, banner.y, banner.width - 30, banner.height, leaveNotice,
                     Style(17, Ink, FontStyle.Bold, TextAnchor.MiddleCenter));
             }
-            Label(42, 1038, 1470, 25, Time.unscaledTime < errorUntil ? error : network.Status + (previewTable != null ? "  ·  Visual preview" : "  ·  Play chips"), small);
+            Label(currentTable != null ? 720 : 42, currentTable != null ? 1018 : 1038,
+                currentTable != null ? 480 : 1470, currentTable != null ? 46 : 25,
+                Time.unscaledTime < errorUntil ? error : network.Status + (previewTable != null ? "  ·  Visual preview" : "  ·  Play chips"), small);
             GUI.enabled = wasEnabled;
             if (needsRebuy) RebuyDialog(currentTable);
             else { if (showRules) Rules(); if (showHistory) History(); if (showSettings) Settings(); }
@@ -516,11 +531,15 @@ namespace Drawmaha
             bool connecting = network.Status == "Connecting…";
             if (Button(new Rect(1050, 461, 262, 47), connecting ? "Connecting…" : "Connect", !connecting, true))
             {
-                PlayerPrefs.SetString("drawmaha.username", username);
+                PlayerPrefs.SetString(LocalTestPlayer.Key("drawmaha.username"), username);
                 PlayerPrefs.Save();
                 network.Connect(endpoint, username, avatarIndex, invite);
             }
             Label(286, 861, 900, 30, "Your invite code is used to join your private game server.", Style(14, Dim));
+            if (LocalTestPlayer.Number > 0 || !string.IsNullOrEmpty(LocalTestPlayer.ServerOverride))
+                Label(286, 550, 1026, 70,
+                    (LocalTestPlayer.Number > 0 ? LocalTestPlayer.Label + " · Separate saved wallet and reconnect session" : "Local server connection")
+                    + "\nServer: " + endpoint, small);
             GUI.matrix = oldMatrix;
         }
         void Table()
@@ -538,7 +557,7 @@ namespace Drawmaha
             {
                 for (int i = 0; i < 6; i++) Seat(t, i);
                 Label(560, 495, 800, 70, "Waiting for players", Style(30, Color.black, FontStyle.Bold, TextAnchor.MiddleCenter));
-                Controls(t);
+                Controls(t); Chat(t);
                 return;
             }
             Rect potTracker = new Rect(840, 376, 240, 48);
@@ -555,7 +574,7 @@ namespace Drawmaha
             for (int i = 0; i < 6; i++) Seat(t, i);
             if (t.stage == "Complete" && shownBoard == t.board.Length)
                 Label(650, 568, 620, 86, string.Join("\n", t.results.Take(3).ToArray()), Style(17, Color.black, FontStyle.Normal, TextAnchor.MiddleCenter));
-            Controls(t);
+            Controls(t); Chat(t);
         }
         void Seat(TableState t, int actual)
         {
@@ -831,6 +850,63 @@ namespace Drawmaha
             else if (suit >= 0 && suit < cardSuitSources.Length && cardSuitSources[suit] != null)
                 Fill(rect, tint, cardSuitSources[suit]);
         }
+        void Chat(TableState table)
+        {
+            Rect panel = new Rect(40, 880, 650, 184);
+            Fill(panel, Panel, rounded);
+            if (chatTable != table.id)
+            {
+                chatTable = table.id; chatDraft = ""; chatScroll = Vector2.zero; lastChatSequence = -1;
+            }
+            IReadOnlyList<ChatMessageView> messages = network.ChatMessages;
+            if (previewTable != null) messages = PreviewChat;
+            bool supported = previewTable != null || network.SupportsTableChat;
+            Label(58, 890, 300, 22, "TABLE CHAT", chatMeta);
+            Label(548, 890, 124, 22, ChatRules.CharacterCount(chatDraft) + "/" + ChatRules.MaxCharacters,
+                Style(13, Dim, FontStyle.Normal, TextAnchor.MiddleRight));
+            Rect viewport = new Rect(58, 916, 614, 89);
+            float width = viewport.width - 20;
+            float height = 0;
+            foreach (var entry in messages)
+                height += Mathf.Max(22, chatText.CalcHeight(new GUIContent(entry.username + ": " + entry.message), width)) + 6;
+            bool newMessage = messages.Count > 0 && messages[messages.Count - 1].sequence != lastChatSequence;
+            bool atBottom = chatScroll.y >= Mathf.Max(0, chatContentHeight - viewport.height) - 18;
+            if (newMessage && atBottom) chatScroll.y = Mathf.Max(0, height - viewport.height);
+            if (messages.Count > 0) lastChatSequence = messages[messages.Count - 1].sequence;
+            chatContentHeight = height;
+            chatScroll = GUI.BeginScrollView(viewport, chatScroll, new Rect(0, 0, width, Mathf.Max(viewport.height, height)));
+            float y = 0;
+            foreach (var entry in messages)
+            {
+                string line = entry.username + ": " + entry.message;
+                float rowHeight = Mathf.Max(22, chatText.CalcHeight(new GUIContent(line), width));
+                GUI.Label(new Rect(0, y, width, rowHeight), line, chatText); y += rowHeight + 6;
+            }
+            GUI.EndScrollView();
+            if (messages.Count == 0)
+                Label(viewport.x, viewport.y + 4, viewport.width, viewport.height,
+                    !supported ? "Server update required for table chat." : "Say hello to the table.", small);
+            bool canType = GUI.enabled && network.Connected && supported && previewTable == null;
+            bool wasEnabled = GUI.enabled; GUI.enabled = wasEnabled && canType;
+            bool enter = Event.current.type == EventType.KeyDown
+                && (Event.current.keyCode == KeyCode.Return || Event.current.keyCode == KeyCode.KeypadEnter)
+                && GUI.GetNameOfFocusedControl() == "TableChatInput";
+            if (enter) Event.current.Use();
+            GUI.SetNextControlName("TableChatInput");
+            chatDraft = ChatRules.LimitInput(GUI.TextField(new Rect(58, 1018, 504, 34), chatDraft, ChatRules.MaxCharacters * 2, chatInput));
+            bool canSend = canType && !network.ChatPending && !string.IsNullOrWhiteSpace(chatDraft);
+            bool clicked = Button(new Rect(572, 1018, 100, 34), network.ChatPending ? "Sending…" : "Send", canSend, true);
+            if (canSend && (clicked || enter))
+            {
+                network.SendChat(chatDraft); GUI.FocusControl("TableChatInput");
+            }
+            GUI.enabled = wasEnabled;
+        }
+        static readonly ChatMessageView[] PreviewChat = {
+            new ChatMessageView { sequence = 1, username = "Northstar", message = "Good luck, everyone!" },
+            new ChatMessageView { sequence = 2, username = "You", message = "Thanks! Have a great game." },
+            new ChatMessageView { sequence = 3, username = "RiverRun", message = "Nice hand." }
+        };
         void Controls(TableState t)
         {
             Fill(new Rect(1230, 880, 650, 184), Panel, rounded);

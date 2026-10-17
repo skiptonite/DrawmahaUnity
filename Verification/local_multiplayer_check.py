@@ -41,7 +41,8 @@ with (run_dir / 'server.log').open('w', encoding='utf-8') as log:
                 time.sleep(.1)
         else:
             raise RuntimeError('Local test server did not become ready.')
-        subprocess.run([sys.executable, str(root / 'Verification/multiplayer_smoke.py'),
+        test = 'chat_smoke.py' if '--chat' in sys.argv else 'multiplayer_smoke.py'
+        subprocess.run([sys.executable, str(root / 'Verification' / test),
                         f'ws://127.0.0.1:{port}/ws'], cwd=root, env=env, check=True, timeout=180)
     finally:
         # Stop only the child process created above. This deliberately tests crash/open-stream inspection.

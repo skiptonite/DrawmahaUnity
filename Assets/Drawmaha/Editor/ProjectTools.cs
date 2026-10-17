@@ -37,14 +37,43 @@ namespace Drawmaha.Editor
         public static void RunChecks() { Debug.Log(LogicChecks.Run()); }
         [MenuItem("Tools/Drawmaha/Build Windows Client")]
         public static void BuildWindows()
+        { BuildWindowsClient(); }
+        static bool BuildWindowsClient()
         {
-            if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return;
+            if (!EditorSceneManager.SaveCurrentModifiedScenesIfUserWantsTo()) return false;
             EnsureScene(); Directory.CreateDirectory("Builds/Windows");
             var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions {
                 scenes = new[] { ScenePath }, locationPathName = "Builds/Windows/Drawmaha.exe",
                 target = BuildTarget.StandaloneWindows64, options = BuildOptions.None
             });
             Debug.Log("Drawmaha build: " + report.summary.result + " · " + report.summary.totalErrors + " errors");
+            return report.summary.result == UnityEditor.Build.Reporting.BuildResult.Succeeded;
+        }
+        [MenuItem("Tools/Drawmaha/Testing/Build and Launch Two Windows Players")]
+        public static void BuildAndLaunchTwoPlayers()
+        { if (BuildWindowsClient()) LaunchTwoPlayers(); }
+        [MenuItem("Tools/Drawmaha/Testing/Launch Two Windows Players")]
+        public static void LaunchTwoPlayers()
+        {
+            string executable = Path.GetFullPath("Builds/Windows/Drawmaha.exe");
+            if (!File.Exists(executable)) { Debug.LogError("Build the Windows client first: Tools → Drawmaha → Build Windows Client."); return; }
+            for (int player = 1; player <= 2; player++)
+                System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo {
+                    FileName = executable, WorkingDirectory = Path.GetDirectoryName(executable), UseShellExecute = false,
+                    Arguments = "-drawmaha-test-player " + player + " -screen-fullscreen 0 -screen-width 960 -screen-height 540"
+                });
+        }
+        [MenuItem("Tools/Drawmaha/Testing/Editor Identity/Normal Player")]
+        public static void UseNormalPlayer() { SetEditorPlayer(0); }
+        [MenuItem("Tools/Drawmaha/Testing/Editor Identity/Test Player 1")]
+        public static void UseTestPlayer1() { SetEditorPlayer(1); }
+        [MenuItem("Tools/Drawmaha/Testing/Editor Identity/Test Player 2")]
+        public static void UseTestPlayer2() { SetEditorPlayer(2); }
+        static void SetEditorPlayer(int player)
+        {
+            if (EditorApplication.isPlaying) { Debug.LogWarning("Stop Play mode before changing the editor's test identity."); return; }
+            EditorPrefs.SetInt(Drawmaha.Network.LocalTestPlayer.EditorPreferenceKey, player);
+            Debug.Log(player == 0 ? "Editor will use your normal saved player on next Play." : "Editor will use test player " + player + " on next Play.");
         }
         [MenuItem("Tools/Drawmaha/Build macOS Client")]
         public static void BuildMacOS()
