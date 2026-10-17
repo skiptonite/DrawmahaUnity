@@ -4,8 +4,9 @@ namespace Drawmaha.Network
 {
     public static class WireProtocol
     {
-        public const int Current = 11;
+        public const int Current = 12;
         public const int PrivateTables = 11;
+        public const int AutoTopUp = 12;
         public const int ProfileUpdates = 9;
         public const int TableChat = 8;
         public const int WaitingPreferences = 5;
@@ -17,9 +18,9 @@ namespace Drawmaha.Network
         public string type, username, token, walletId, tableId, entryMode, id, message;
         public string tableName, inviteCode;
         public int avatar, hand, protocol;
-        public float raiseTo, smallBlind, bigBlind, minBuyIn, maxBuyIn, buyInAmount;
+        public float raiseTo, smallBlind, bigBlind, minBuyIn, maxBuyIn, buyInAmount, addOnAmount, autoTopUpBigBlinds;
         public long revision;
-        public bool enabled, isPublic;
+        public bool enabled, isPublic, alwaysTopUpMax;
         public float callAmount;
         public int[] discards;
     }
@@ -27,7 +28,8 @@ namespace Drawmaha.Network
     {
         public string type, message, token, epoch, id;
         public int protocol;
-        public float walletBalance;
+        public float walletBalance, autoTopUpBigBlinds, addOnAmount;
+        public bool autoTopUpEnabled, alwaysTopUpMax;
         public LobbyRow[] tables;
         public TableState table;
         public string tableId;
@@ -117,7 +119,7 @@ namespace Drawmaha.Network
     [Serializable] public class SeatView
     {
         public int seat, avatar, count, drawCount;
-        public float stack, bet;
+        public float stack, bet, pendingAddOn;
         public string username, status, entryMode;
         public bool occupied, connected, inHand, folded, leaving, winner, scoop, needsRebuy, drawLocked, checkFold, callQueued, waitingToAct;
         public float callAmount;
@@ -131,6 +133,7 @@ namespace Drawmaha.Network
         public float smallBlind, bigBlind, minBuyIn, maxBuyIn, pot, call, minRaise, maxRaise;
         public long revision, deadlineUnixMs, serverUnixMs;
         public bool canRaise, showdown;
+        public bool isPublic, buyInReserved;
         public SeatView[] players;
         public CardView[] board;
         public HandHistoryView[] handHistory;

@@ -38,6 +38,33 @@ public sealed class WalletStore
         lock (gate) return ReadBalance(GetWallet(walletId));
     }
 
+    public (bool Enabled, float BigBlinds, bool AlwaysMax) GetAutoTopUp(string walletId)
+    {
+        lock (gate)
+        {
+            TableEntity wallet = GetWallet(walletId);
+            bool enabled = wallet.TryGetValue("AutoTopUpEnabled", out object enabledValue) && enabledValue is bool enabledFlag && enabledFlag;
+            bool alwaysMax = wallet.TryGetValue("AlwaysTopUpMax", out object maxValue) && maxValue is bool maxFlag && maxFlag;
+            float bigBlinds = wallet.TryGetValue("AutoTopUpBigBlinds", out object amountValue)
+                ? RoundChips(Convert.ToSingle(amountValue, System.Globalization.CultureInfo.InvariantCulture)) : 100;
+            return (enabled, bigBlinds, alwaysMax);
+        }
+    }
+
+    public void SetAutoTopUp(string walletId, float bigBlinds, bool enabled, bool alwaysMax)
+    {
+        if (float.IsNaN(bigBlinds) || float.IsInfinity(bigBlinds) || bigBlinds < 0 || bigBlinds > 1000000)
+            throw new ArgumentException("Auto top-up must be configured in a valid number of big blinds.");
+        lock (gate)
+        {
+            TableEntity wallet = GetWallet(walletId);
+            wallet["AutoTopUpEnabled"] = enabled;
+            wallet["AutoTopUpBigBlinds"] = (double)Math.Round(bigBlinds, 2, MidpointRounding.AwayFromZero);
+            wallet["AlwaysTopUpMax"] = enabled && alwaysMax;
+            Save(wallet, 0, null);
+        }
+    }
+
     public void BuyIn(string walletId, string tableId, float amount)
     {
         lock (gate)
@@ -53,7 +80,7 @@ public sealed class WalletStore
         }
     }
 
-    public void Rebuy(string walletId, string tableId, float amount)
+    public void Rebuy(string walletId, string tableId, float amount, string reason = "rebuy")
     {
         lock (gate)
         {
@@ -63,7 +90,7 @@ public sealed class WalletStore
             if (balance < amount) throw new InvalidOperationException("Not enough chips in your main bank for a rebuy.");
             wallet["Balance"] = (double)RoundChips(balance - amount);
             wallet["TableStack"] = (double)RoundChips(ReadTableStack(wallet) + amount);
-            Save(wallet, -amount, "rebuy");
+            Save(wallet, -amount, reason);
         }
     }
 

@@ -36,10 +36,10 @@ namespace Drawmaha
         const string AzureEndpoint = "wss://drawmaha.blackmushroom-85b81292.centralus.azurecontainerapps.io/ws";
         string endpoint = AzureEndpoint, username = "", error = "", lastTable = "";
         bool post, showMenu, showHistory, showRules, showSettings, showProfile, hasSavedProfile, profileSaveRequested;
-        bool showCreateTable, showJoinTable, createPublic;
+        bool showCreateTable, showJoinTable, showAddOnDialog, createPublic, createdTableReservation;
         string profileName = "", profileError = "";
         string tableName = "My Table", minBuyInText = "1000", maxBuyInText = "5000";
-        string createInviteCode = "", joinInviteCode = "", joinBuyInText = "";
+        string createInviteCode = "", joinInviteCode = "", joinBuyInText = "", addOnAmountText = "", autoTopUpBigBlindsText = "";
         string tableDialogError = "";
         LobbyRow selectedTable;
         int blindStructureIndex, blindStructurePressedIndex = -1;
@@ -113,6 +113,8 @@ namespace Drawmaha
             if (!string.IsNullOrWhiteSpace(LocalTestPlayer.ServerOverride)) endpoint = LocalTestPlayer.ServerOverride;
             network = gameObject.AddComponent<MultiplayerClient>();
             network.StateChanged += Received;
+            network.CommandConfirmed += HandleCommandConfirmed;
+            network.TopUpSettingsChanged += () => autoTopUpBigBlindsText = FormatChips(network.AutoTopUpBigBlinds);
             network.ChatConfirmed += sent => { if (chatDraft.Trim() == sent) chatDraft = ""; };
             network.ProfileChanged += () => {
                 username = network.PlayerName; avatarIndex = network.PlayerAvatar; hasSavedProfile = true;
@@ -127,7 +129,7 @@ namespace Drawmaha
             network.ProfileFailure += s => { profileSaveRequested = false; profileError = s; };
             network.Failure += s => {
                 ClearOptimisticPreferences(); error = s; errorUntil = Time.unscaledTime + 8;
-                if (showCreateTable || showJoinTable) tableDialogError = s;
+                if (showCreateTable || showJoinTable || showAddOnDialog) tableDialogError = s;
                 if (profileSaveRequested) { profileError = s; profileSaveRequested = false; }
             };
 #if UNITY_EDITOR
@@ -206,6 +208,17 @@ namespace Drawmaha
         void Received(TableState state)
         {
             if (state == null) return;
+            if (state.buyInReserved)
+            {
+                if (!createdTableReservation || selectedTable?.id != state.id)
+                {
+                    selectedTable = new LobbyRow { id = state.id, name = state.name, smallBlind = state.smallBlind,
+                        bigBlind = state.bigBlind, minBuyIn = state.minBuyIn, maxBuyIn = state.maxBuyIn,
+                        buyIn = state.minBuyIn, isPublic = state.isPublic };
+                    joinInviteCode = ""; joinBuyInText = FormatChips(state.minBuyIn);
+                }
+                createdTableReservation = true; showCreateTable = false; showJoinTable = true;
+            }
             if (state.yourSeat >= 0) { showCreateTable = false; showJoinTable = false; }
             UpdateHandLabels(state);
             if (previous != null && state.id == previous.id && state.hand == previous.hand)
@@ -497,8 +510,34 @@ namespace Drawmaha
             else if (needsRebuy) RebuyDialog(currentTable);
             else if (showCreateTable) CreateTableDialog();
             else if (showJoinTable) JoinTableDialog();
-            else { if (showRules) Rules(); if (showHistory) History(); if (showSettings) Settings(); }
+            else
+            {
+                if (showRules) Rules(); if (showHistory) History(); if (showSettings) Settings();
+                if (showAddOnDialog) AddOnDialog();
+            }
             GUI.matrix = old;
+        }
+        void HandleCommandConfirmed(string type, string tableId)
+        {
+            if (type == "create")
+            {
+                float.TryParse(minBuyInText, NumberStyles.Float, CultureInfo.InvariantCulture, out float minimum);
+                float.TryParse(maxBuyInText, NumberStyles.Float, CultureInfo.InvariantCulture, out float maximum);
+                (float SmallBlind, float BigBlind) blinds = BlindStructures.Options[Mathf.Clamp(blindStructureIndex, 0, BlindStructures.Options.Length - 1)];
+                selectedTable = new LobbyRow { id = tableId, name = tableName.Trim(), smallBlind = blinds.SmallBlind,
+                    bigBlind = blinds.BigBlind, minBuyIn = minimum, maxBuyIn = maximum, buyIn = minimum, isPublic = createPublic };
+                joinInviteCode = createInviteCode; joinBuyInText = FormatChips(minimum);
+                createdTableReservation = true; showCreateTable = false; showJoinTable = true; tableDialogError = "";
+            }
+            else if (type == "join")
+            {
+                createdTableReservation = false; showJoinTable = false; showCreateTable = false;
+            }
+            else if (type == "cancelCreate")
+            {
+                createdTableReservation = false; showJoinTable = false;
+            }
+            else if (type == "addOn") showAddOnDialog = false;
         }
         void Menu(TableState currentTable)
         {
@@ -569,7 +608,7 @@ namespace Drawmaha
                 Label(700, y + 20, 110, 32, row.occupied + " / " + row.maxSeats);
                 if (Button(new Rect(880, y + 13, 128, 43), "Join", network.Connected && network.SupportsPrivateTables && row.available > 0 && network.BankBalance >= minimum && !network.CommandPending, true))
                 {
-                    selectedTable = row; joinInviteCode = ""; joinBuyInText = FormatChips(minimum); tableDialogError = ""; showJoinTable = true;
+                    selectedTable = row; createdTableReservation = false; joinInviteCode = ""; joinBuyInText = FormatChips(minimum); tableDialogError = ""; showJoinTable = true;
                 }
             }
             GUI.EndScrollView();
@@ -613,7 +652,7 @@ namespace Drawmaha
                 && maximum >= minimum && maximum <= 100000000
                 && System.Text.RegularExpressions.Regex.IsMatch(tableName.Trim(), @"^[a-zA-Z0-9][a-zA-Z0-9 _-]{2,31}$")
                 && (createPublic || System.Text.RegularExpressions.Regex.IsMatch(createInviteCode.Trim(), @"^[a-zA-Z0-9-]{8,24}$"));
-            if (Button(new Rect(1060, 840, 300, 58), network.CommandPending ? "Creating…" : "Create and join", settingsValid && network.Connected && network.SupportsPrivateTables && !network.CommandPending, true))
+            if (Button(new Rect(1060, 840, 300, 58), network.CommandPending ? "Creating…" : "Create table", settingsValid && network.Connected && network.SupportsPrivateTables && !network.CommandPending, true))
             {
                 tableDialogError = "";
                 network.Send(new Command { type = "create", tableName = tableName, smallBlind = blinds.SmallBlind, bigBlind = blinds.BigBlind,
@@ -709,30 +748,50 @@ namespace Drawmaha
         void JoinTableDialog()
         {
             Fill(new Rect(0, 0, W, H), new Color(0, 0, 0, 0.68f));
-            Rect panel = new Rect(540, 250, 840, 580); Fill(panel, Panel, rounded);
-            Label(600, 284, 620, 46, "JOIN " + (selectedTable?.name ?? "TABLE").ToUpperInvariant(), Style(28, Ink, FontStyle.Bold));
-            if (Button(new Rect(1290, 272, 54, 48), "X")) showJoinTable = false;
-            Label(600, 348, 700, 34, selectedTable != null && selectedTable.isPublic ? "This public table is open to join." : "Enter this table's invite code.", small);
+            Rect panel = new Rect(540, 220, 840, 650); Fill(panel, Panel, rounded);
+            Label(600, 250, 620, 46, (createdTableReservation ? "BUY IN: " : "JOIN ") + (selectedTable?.name ?? "TABLE").ToUpperInvariant(), Style(27, Ink, FontStyle.Bold));
+            if (Button(new Rect(1290, 236, 54, 48), "X"))
+            {
+                if (createdTableReservation) network.Send(new Command { type = "cancelCreate" });
+                createdTableReservation = false; showJoinTable = false;
+            }
+            Label(600, 306, 740, 30, "Main bank: " + FormatChips(network.BankBalance) + " chips", bold);
+            if (selectedTable != null)
+                Label(600, 340, 740, 26, FormatChips(selectedTable.smallBlind) + " / " + FormatChips(selectedTable.bigBlind)
+                    + " blinds  ·  Buy-in " + FormatChips(selectedTable.minBuyIn) + "–" + FormatChips(selectedTable.maxBuyIn), small);
             if (selectedTable != null && !selectedTable.isPublic)
             {
-                Label(600, 402, 640, 24, "Invite code", small);
-                joinInviteCode = GUI.PasswordField(new Rect(600, 430, 740, 48), joinInviteCode, '*', 24, input);
+                Label(600, 382, 640, 24, "Invite code", small);
+                joinInviteCode = GUI.PasswordField(new Rect(600, 410, 740, 46), joinInviteCode, '*', 24, input);
             }
-            Label(600, selectedTable != null && selectedTable.isPublic ? 416 : 504, 640, 24, "Buy-in", small);
-            joinBuyInText = GUI.TextField(new Rect(600, selectedTable != null && selectedTable.isPublic ? 444 : 532, 740, 48), joinBuyInText, 12, input);
+            float buyInY = selectedTable != null && selectedTable.isPublic ? 390 : 470;
             float min = selectedTable == null ? 0 : selectedTable.minBuyIn > 0 ? selectedTable.minBuyIn : selectedTable.buyIn;
             float max = selectedTable == null ? 0 : selectedTable.maxBuyIn > 0 ? selectedTable.maxBuyIn : selectedTable.buyIn;
-            if (selectedTable != null) Label(600, selectedTable.isPublic ? 500 : 588, 740, 24, "Allowed: " + FormatChips(min) + "–" + FormatChips(max) + " chips", Style(14, Dim));
+            Label(600, buyInY, 640, 24, "Buy-in", small);
+            float sliderMax = Mathf.Max(min, Mathf.Min(max, network.BankBalance));
+            float currentAmount = TryParseChips(joinBuyInText, out float parsedAmount) ? parsedAmount : min;
+            float sliderAmount = GUI.HorizontalSlider(new Rect(600, buyInY + 48, 450, 22), Mathf.Clamp(currentAmount, min, sliderMax),
+                min, sliderMax, betSliderStyle, betSliderThumbStyle);
+            if (!Mathf.Approximately(sliderAmount, currentAmount)) joinBuyInText = FormatChips(sliderAmount);
+            joinBuyInText = GUI.TextField(new Rect(1080, buyInY + 32, 260, 48), joinBuyInText, 12, input);
+            if (selectedTable != null) Label(600, buyInY + 82, 740, 24,
+                "Choose " + FormatChips(min) + "–" + FormatChips(max) + " chips; the slider is limited by your bank.", Style(14, Dim));
             if (!string.IsNullOrEmpty(tableDialogError)) Label(600, 630, 740, 44, tableDialogError, Style(15, new Color(1f, 0.55f, 0.48f)));
             bool validAmount = TryParseChips(joinBuyInText, out float amount) && amount >= min && amount <= max && amount <= network.BankBalance;
             bool validCode = selectedTable != null && (selectedTable.isPublic || (joinInviteCode.Trim().Length >= 8 && joinInviteCode.Trim().Length <= 24));
-            if (Button(new Rect(1040, 720, 300, 58), network.CommandPending ? "Joining…" : "Join table", validAmount && validCode && network.Connected && !network.CommandPending, true))
+            string acceptLabel = createdTableReservation ? "Accept and sit down" : "Join table";
+            if (Button(new Rect(1040, 760, 300, 58), network.CommandPending ? "Joining…" : acceptLabel,
+                validAmount && validCode && network.Connected && !network.CommandPending, true))
             {
                 tableDialogError = "";
                 network.Send(new Command { type = "join", tableId = selectedTable.id, entryMode = post ? "post" : "wait",
                     inviteCode = joinInviteCode, buyInAmount = amount });
             }
-            if (Button(new Rect(600, 720, 300, 58), "Cancel", !network.CommandPending)) showJoinTable = false;
+            if (Button(new Rect(600, 760, 300, 58), "Cancel", !network.CommandPending))
+            {
+                if (createdTableReservation) network.Send(new Command { type = "cancelCreate" });
+                createdTableReservation = false; showJoinTable = false;
+            }
         }
         void ConnectScreen()
         {
@@ -853,7 +912,8 @@ namespace Drawmaha
             {
                 for (int i = 0; i < 6; i++) Seat(t, i);
                 Label(560, 495, 800, 70, "Waiting for players", Style(30, Color.black, FontStyle.Bold, TextAnchor.MiddleCenter));
-                Controls(t); Chat(t);
+                if (t.yourSeat >= 0) Controls(t);
+                Chat(t);
                 return;
             }
             Rect potTracker = new Rect(840, 376, 240, 48);
@@ -1509,8 +1569,8 @@ namespace Drawmaha
             Matrix4x4 oldMatrix = GUI.matrix;
             GUI.matrix = oldMatrix * Matrix4x4.Translate(new Vector3(160, 40, 0));
             Overlay("CUSTOMIZATION");
-            string[] tabs = { "Card Face", "Card Back", "Table", "Background", "Hole Card Order" };
-            const float tabWidth = 154, tabGap = 8;
+            string[] tabs = { "Card Face", "Card Back", "Table", "Background", "Hole Card Order", "Chips" };
+            const float tabWidth = 130, tabGap = 4;
             for (int i = 0; i < tabs.Length; i++)
             {
                 Rect tab = new Rect(394 + i * (tabWidth + tabGap), 258, tabWidth, 48);
@@ -1533,6 +1593,11 @@ namespace Drawmaha
         }
         void DrawCustomizationGrid()
         {
+            if (customizationTab == 5)
+            {
+                DrawChipSettings();
+                return;
+            }
             if (customizationTab == 4)
             {
                 DrawHoleCardOrderSetting();
@@ -1610,6 +1675,109 @@ namespace Drawmaha
                 Label(x, 153, 232, 48, descriptions[i], Style(14, Dim, FontStyle.Normal, TextAnchor.UpperCenter));
             }
             GUI.EndScrollView();
+        }
+        void DrawChipSettings()
+        {
+            customizationScroll = GUI.BeginScrollView(new Rect(394, 318, 812, 430), customizationScroll,
+                new Rect(0, 0, 812, 456));
+            Label(20, 20, 760, 38, "CHIPS", Style(20, Ink, FontStyle.Bold));
+            TableState table = CurrentTable;
+            bool seated = table != null && table.yourSeat >= 0 && table.yourSeat < table.players.Length;
+            if (seated)
+            {
+                SeatView player = table.players[table.yourSeat];
+                Label(24, 66, 740, 28, "Stack: " + FormatChips(player.stack)
+                    + "  ·  Available in main bank: " + FormatChips(network.BankBalance), small);
+                if (player.pendingAddOn > 0)
+                    Label(24, 98, 740, 26, "Add-on queued for next hand: " + FormatChips(player.pendingAddOn), Style(15, Accent));
+                float addOnMax = Mathf.Min(network.BankBalance, Mathf.Max(0, table.maxBuyIn - player.stack - player.pendingAddOn));
+                if (Button(new Rect(24, 130, 230, 50), "Add-on", addOnMax > 0 && network.Connected && !network.CommandPending, true))
+                {
+                    addOnAmountText = FormatChips(addOnMax); tableDialogError = ""; showAddOnDialog = true;
+                }
+            }
+            else Label(24, 66, 740, 28, "Join a table before adding on or configuring auto top-up.", small);
+
+            Label(24, 202, 740, 28, "AUTO TOP-UP", Style(17, Ink, FontStyle.Bold));
+            bool autoEnabled = network.AutoTopUpEnabled;
+            bool alwaysMax = network.AlwaysTopUpMax;
+            if (PreferenceButton(new Rect(24, 238, 350, 48), "Auto top-up", autoEnabled,
+                seated && network.Connected && !network.CommandPending, out bool nextEnabled))
+                SendAutoTopUpSettings(nextEnabled, network.AutoTopUpBigBlinds, alwaysMax);
+
+            Label(24, 300, 300, 24, "Top-up threshold (big blinds)", Style(14, Dim));
+            const string topUpControlName = "DrawmahaAutoTopUpBigBlinds";
+            if (GUI.GetNameOfFocusedControl() != topUpControlName)
+                autoTopUpBigBlindsText = FormatChips(network.AutoTopUpBigBlinds);
+            GUI.SetNextControlName(topUpControlName);
+            autoTopUpBigBlindsText = GUI.TextField(new Rect(24, 328, 300, 48), autoTopUpBigBlindsText, 12, input);
+            if (PreferenceButton(new Rect(390, 238, 390, 48), "Always top up to the max", alwaysMax,
+                seated && autoEnabled && network.Connected && !network.CommandPending, out bool nextAlwaysMax))
+                SendAutoTopUpSettings(autoEnabled, network.AutoTopUpBigBlinds, nextAlwaysMax);
+            if (Button(new Rect(390, 328, 300, 48), "Save top-up settings",
+                seated && network.Connected && !network.CommandPending, true))
+            {
+                if (!TryParseChips(autoTopUpBigBlindsText, out float bigBlinds) || bigBlinds > 1000000)
+                    tableDialogError = "Enter a valid top-up threshold in big blinds.";
+                else
+                {
+                    tableDialogError = "";
+                    SendAutoTopUpSettings(autoEnabled, bigBlinds, alwaysMax);
+                }
+            }
+            if (!string.IsNullOrEmpty(tableDialogError))
+                Label(24, 386, 740, 28, tableDialogError, Style(14, new Color(1f, 0.55f, 0.48f)));
+            Label(24, 414, 740, 28, "Top-ups are withdrawn from your bank before the next hand.", Style(14, Dim));
+            GUI.EndScrollView();
+        }
+        void SendAutoTopUpSettings(bool enabled, float bigBlinds, bool alwaysMax)
+        {
+            network.Send(new Command { type = "autoTopUp", enabled = enabled,
+                autoTopUpBigBlinds = bigBlinds, alwaysTopUpMax = alwaysMax });
+        }
+        void AddOnDialog()
+        {
+            TableState table = CurrentTable;
+            if (table == null || table.yourSeat < 0 || table.yourSeat >= table.players.Length)
+            { showAddOnDialog = false; return; }
+            SeatView player = table.players[table.yourSeat];
+            float maximum = Mathf.Min(network.BankBalance,
+                Mathf.Max(0, table.maxBuyIn - player.stack - player.pendingAddOn));
+            float entered = TryParseChips(addOnAmountText, out float parsed) ? parsed : maximum;
+            Fill(new Rect(0, 0, W, H), new Color(0, 0, 0, 0.68f));
+            Rect panel = new Rect(540, 270, 840, 540); Fill(panel, Panel, rounded);
+            Label(600, 300, 650, 46, "ADD-ON", Style(29, Ink, FontStyle.Bold));
+            Label(600, 362, 740, 28, "Current stack: " + FormatChips(player.stack)
+                + "  ·  Main bank: " + FormatChips(network.BankBalance), small);
+            Label(600, 410, 740, 28, "Maximum available add-on: " + FormatChips(maximum), small);
+            float sliderValue = GUI.HorizontalSlider(new Rect(600, 468, 450, 22), Mathf.Clamp(entered, 0, maximum),
+                0, maximum, betSliderStyle, betSliderThumbStyle);
+            if (!Mathf.Approximately(sliderValue, entered)) addOnAmountText = FormatChips(sliderValue);
+            const string addOnControlName = "DrawmahaAddOnAmount";
+            bool focusedBefore = GUI.GetNameOfFocusedControl() == addOnControlName;
+            bool clickAway = focusedBefore && Event.current.type == EventType.MouseDown
+                && !new Rect(1080, 450, 260, 48).Contains(Event.current.mousePosition);
+            GUI.SetNextControlName(addOnControlName);
+            addOnAmountText = GUI.TextField(new Rect(1080, 450, 260, 48), addOnAmountText, 12, input);
+            bool focusedAfter = GUI.GetNameOfFocusedControl() == addOnControlName;
+            bool enter = focusedAfter && Event.current.type == EventType.KeyDown
+                && (Event.current.keyCode == KeyCode.Return || Event.current.keyCode == KeyCode.KeypadEnter);
+            if (clickAway || enter || (focusedBefore && !focusedAfter))
+            {
+                float value = TryParseChips(addOnAmountText, out float typed) ? typed : maximum;
+                addOnAmountText = FormatChips(Mathf.Clamp(value, 0, maximum));
+                GUI.FocusControl(null);
+                if (enter) Event.current.Use();
+            }
+            if (!string.IsNullOrEmpty(tableDialogError)) Label(600, 520, 740, 36, tableDialogError, Style(14, new Color(1f, 0.55f, 0.48f)));
+            if (Button(new Rect(1040, 710, 300, 58), "Queue for next hand",
+                network.Connected && !network.CommandPending && maximum > 0
+                    && TryParseChips(addOnAmountText, out float amount) && amount > 0, true))
+            {
+                float.TryParse(addOnAmountText, NumberStyles.Float, CultureInfo.InvariantCulture, out float amount);
+                network.Send(new Command { type = "addOn", addOnAmount = Mathf.Clamp(amount, 0, maximum) });
+            }
+            if (Button(new Rect(600, 710, 300, 58), "Cancel", !network.CommandPending)) showAddOnDialog = false;
         }
     }
 }

@@ -20,6 +20,7 @@ namespace Drawmaha.Network
         public bool SupportsTableChat { get { return ServerProtocol >= WireProtocol.TableChat; } }
         public bool SupportsProfileUpdates { get { return ServerProtocol >= WireProtocol.ProfileUpdates; } }
         public bool SupportsPrivateTables { get { return ServerProtocol >= WireProtocol.PrivateTables; } }
+        public bool SupportsAutoTopUp { get { return ServerProtocol >= WireProtocol.AutoTopUp; } }
         public bool IsConnecting { get { return connectInProgress; } }
         public string PlayerName { get { return username ?? ""; } }
         public int PlayerAvatar { get { return avatar; } }
@@ -30,6 +31,8 @@ namespace Drawmaha.Network
         public IReadOnlyList<ChatMessageView> ChatMessages { get { return chatMessages; } }
         public bool ChatPending { get { return pendingChatId != null; } }
         public event Action<string> ChatConfirmed;
+        public event Action<string, string> CommandConfirmed;
+        public event Action TopUpSettingsChanged;
         public string Status { get; private set; } = "Not connected";
         public TableState Table { get; private set; }
         public LobbyRow[] Tables { get; private set; } = new LobbyRow[0];
@@ -42,7 +45,7 @@ namespace Drawmaha.Network
         readonly SemaphoreSlim sendGate = new SemaphoreSlim(1, 1);
         ClientWebSocket socket;
         CancellationTokenSource cancel;
-        string username, token, walletId, pendingId, epoch;
+        string username, token, walletId, pendingId, pendingCommandType, epoch;
         string pendingProfileId;
         float pendingProfileAt;
         string pendingChatId, pendingChatText;
@@ -52,6 +55,9 @@ namespace Drawmaha.Network
         bool wantConnection, connectInProgress;
         float reconnectAt;
         public float BankBalance { get; private set; }
+        public bool AutoTopUpEnabled { get; private set; }
+        public float AutoTopUpBigBlinds { get; private set; }
+        public bool AlwaysTopUpMax { get; private set; }
         string TokenKey { get { return LocalTestPlayer.Key("drawmaha.token." + Endpoint); } }
         string WalletKey { get { return LocalTestPlayer.Key("drawmaha.wallet.id." + Endpoint); } }
         string LegacyTokenKey { get { return TokenKey + "." + (username ?? "").ToLowerInvariant(); } }
@@ -120,7 +126,7 @@ namespace Drawmaha.Network
             {
                 if (message == "closed")
                 {
-                    Connected = false; connectInProgress = false; pendingId = pendingChatId = null;
+                    Connected = false; connectInProgress = false; pendingId = pendingChatId = pendingCommandType = null;
                     if (ProfilePending) { pendingProfileId = null; ProfileFailure?.Invoke("Connection lost before the profile change was confirmed. Please try again."); }
                     reconnectAt = Time.unscaledTime + 3;
                 }
@@ -135,6 +141,8 @@ namespace Drawmaha.Network
                     {
                         bool changed = epoch != null && epoch != packet.epoch;
                         epoch = packet.epoch; token = packet.token; ServerProtocol = packet.protocol; BankBalance = packet.walletBalance;
+                        AutoTopUpEnabled = packet.autoTopUpEnabled; AutoTopUpBigBlinds = packet.autoTopUpBigBlinds;
+                        AlwaysTopUpMax = packet.alwaysTopUpMax; TopUpSettingsChanged?.Invoke();
                         PlayerPrefs.SetString(TokenKey, token);
                         if (LocalTestPlayer.Number == 0) { PlayerPrefs.DeleteKey(LegacyTokenKey); PlayerPrefs.DeleteKey(LegacyWalletKey); }
                         PlayerPrefs.Save();
@@ -154,6 +162,11 @@ namespace Drawmaha.Network
                         pendingProfileId = null; ProfileFailure?.Invoke(packet.message);
                     }
                     else if (packet.type == "wallet") BankBalance = packet.walletBalance;
+                    else if (packet.type == "topUpSettings")
+                    {
+                        AutoTopUpEnabled = packet.autoTopUpEnabled; AutoTopUpBigBlinds = packet.autoTopUpBigBlinds;
+                        AlwaysTopUpMax = packet.alwaysTopUpMax; TopUpSettingsChanged?.Invoke();
+                    }
                     else if (packet.type == "lobby") Tables = packet.tables ?? new LobbyRow[0];
                     else if (packet.type == "state")
                     {
@@ -166,7 +179,7 @@ namespace Drawmaha.Network
                         foreach (var entry in packet.chatMessages ?? new ChatMessageView[0]) AddChat(entry);
                     }
                     else if (packet.type == "chat" && Table != null && packet.tableId == Table.id) AddChat(packet.chat);
-                    else if (packet.type == "left") { Table = null; pendingId = pendingChatId = null; chatMessages.Clear(); }
+                    else if (packet.type == "left") { Table = null; pendingId = pendingChatId = pendingCommandType = null; chatMessages.Clear(); }
                     else if (packet.type == "ack" && pendingChatId != null && packet.id == pendingChatId)
                     {
                         string sent = pendingChatText; pendingChatId = null; ChatConfirmed?.Invoke(sent);
@@ -175,10 +188,15 @@ namespace Drawmaha.Network
                     {
                         pendingChatId = null; Failure?.Invoke(packet.message);
                     }
-                    else if (packet.type == "ack" && packet.id == pendingId) pendingId = null;
+                    else if (packet.type == "ack" && packet.id == pendingId)
+                    {
+                        string confirmedType = pendingCommandType;
+                        pendingId = pendingCommandType = null;
+                        CommandConfirmed?.Invoke(confirmedType, packet.tableId);
+                    }
                     else if (packet.type == "error" && (packet.id == pendingId || string.IsNullOrEmpty(packet.id)))
                     {
-                        pendingId = null; Status = packet.message; Failure?.Invoke(packet.message);
+                        pendingId = pendingCommandType = null; Status = packet.message; Failure?.Invoke(packet.message);
                         if (!Connected) { wantConnection = false; connectInProgress = false; }
                     }
                 }
@@ -188,7 +206,7 @@ namespace Drawmaha.Network
             if (Connected && Time.unscaledTime >= heartbeat) { heartbeat = Time.unscaledTime + 15; Send(new Command { type = "ping" }, false); }
             if (pendingId != null && Time.unscaledTime - pendingAt > 8)
             {
-                pendingId = null; Status = "No action confirmation. Reconnecting for the current table state.";
+                pendingId = pendingCommandType = null; Status = "No action confirmation. Reconnecting for the current table state.";
                 socket?.Abort();
             }
             if (pendingChatId != null && Time.unscaledTime - pendingChatAt > 8)
@@ -240,7 +258,7 @@ namespace Drawmaha.Network
             if (!Connected || (track && CommandPending && !interruptPending)) return;
             if (track)
             {
-                command.id = Guid.NewGuid().ToString("N"); pendingId = command.id; pendingAt = Time.unscaledTime;
+                command.id = Guid.NewGuid().ToString("N"); pendingId = command.id; pendingCommandType = command.type; pendingAt = Time.unscaledTime;
                 if (Table != null) { command.tableId = Table.id; command.hand = Table.hand; command.revision = Table.revision; }
             }
             _ = SendText(JsonUtility.ToJson(command), socket, cancel.Token, generation);
@@ -269,7 +287,7 @@ namespace Drawmaha.Network
         public void Disconnect()
         {
             wantConnection = false; generation++; cancel?.Cancel(); socket?.Abort(); socket = null;
-            Connected = false; connectInProgress = false; pendingId = pendingChatId = pendingProfileId = null; chatMessages.Clear();
+            Connected = false; connectInProgress = false; pendingId = pendingChatId = pendingProfileId = pendingCommandType = null; chatMessages.Clear();
             string ignored; while (inbox.TryDequeue(out ignored)) { } while (notices.TryDequeue(out ignored)) { }
             Status = "Not connected";
         }

@@ -6,9 +6,12 @@ namespace Drawmaha.Server;
 
 public sealed class Session
 {
-    public string Token, Name, WalletId;
+    public string Token, Name, WalletId, PendingRoomId;
     public int Avatar, Seat = -1, DisconnectedHand, LockedDrawHand = -1;
-    public float AutoCallAmount = -1;
+    public int PendingSeat = -1;
+    public float AutoCallAmount = -1, PendingAddOn, AutoTopUpBigBlinds;
+    public bool AutoTopUpEnabled, AlwaysTopUpMax;
+    public DateTime PendingRoomExpires;
     public int[] LockedDiscards;
     public Peer Peer;
     public Room Room;
@@ -58,6 +61,7 @@ public sealed class Room
             id = Id, name = Name, yourSeat = own, hand = Game.HandNumber, revision = Revision,
             stage = Game.Stage.ToString(), dealer = Game.Dealer, smallBlindSeat = Game.SmallBlindSeat, bigBlindSeat = Game.BigBlindSeat,
             smallBlind = Game.SmallBlind, bigBlind = Game.BigBlind, minBuyIn = MinBuyIn, maxBuyIn = MaxBuyIn,
+            isPublic = IsPublic,
             pot = Game.Pot > 0 ? Game.Pot : Game.LastPot, actor = Game.Actor,
             call = own >= 0 && Game.IsBetting ? Game.ToCall(own) : 0,
             minRaise = Game.MinimumRaiseTo, maxRaise = own >= 0 && Game.IsBetting ? Game.MaximumRaiseTo(own) : 0,
@@ -82,6 +86,7 @@ public sealed class Room
                     queuedDrawCount = i == own && s?.LockedDrawHand == Game.HandNumber ? s.LockedDiscards?.Length ?? 0 : 0,
                     checkFold = i == own && s?.CheckFold == true,
                     callQueued = i == own && s != null && s.AutoCallAmount > 0 && s.AutoCallAmount == (Game.IsBetting ? Game.ToCall(i) : 0),
+                    pendingAddOn = i == own ? s?.PendingAddOn ?? 0 : 0,
                     callAmount = i == own && Game.IsBetting ? Game.ToCall(i) : 0,
                     waitingToAct = i == own && Game.IsAwaitingAction(i),
                     entryMode = s?.Entry.ToString() ?? "", leaving = i == own && s?.Leaving == true,
@@ -155,10 +160,24 @@ public sealed class Hub
                 }
             }
             s.Peer = peer; s.LastSeen = DateTime.UtcNow; peer.Session = s;
+            var topUpSettings = wallets.GetAutoTopUp(walletId);
+            s.AutoTopUpEnabled = topUpSettings.Enabled;
+            s.AutoTopUpBigBlinds = topUpSettings.BigBlinds;
+            s.AlwaysTopUpMax = topUpSettings.AlwaysMax;
             peer.Send(new Envelope { type = "welcome", token = s.Token, epoch = Epoch, protocol = WireProtocol.Current,
-                walletBalance = walletBalance, username = s.Name, avatar = s.Avatar });
+                walletBalance = walletBalance, username = s.Name, avatar = s.Avatar,
+                autoTopUpEnabled = s.AutoTopUpEnabled, autoTopUpBigBlinds = s.AutoTopUpBigBlinds, alwaysTopUpMax = s.AlwaysTopUpMax });
             peer.Send(new Envelope { type = "lobby", tables = Rooms.Select(r => r.Lobby()).ToArray() });
             if (s.Room != null) { Changed(s.Room, DateTime.UtcNow); SendChatHistory(s); }
+            else if (s.PendingRoomId != null)
+            {
+                Room pendingRoom = Rooms.FirstOrDefault(room => room.Id == s.PendingRoomId);
+                if (pendingRoom != null)
+                {
+                    TableState preview = pendingRoom.View(null, DateTime.UtcNow); preview.buyInReserved = true;
+                    peer.Send(new Envelope { type = "state", table = preview });
+                }
+            }
         }
     }
     public void Handle(Peer peer, Command command)
@@ -177,10 +196,21 @@ public sealed class Hub
             try
             {
                 if (string.IsNullOrEmpty(command.id) || command.id.Length > 64) throw new ArgumentException("A command ID is required.");
-                if (s.Seen.Contains(command.id)) { if (command.type == "profile") SendProfile(s, command.id); peer.Send(new Envelope { type = "ack", id = command.id }); if (s.Room != null) peer.Send(new Envelope { type = "state", table = s.Room.View(s, now) }); return; }
+                if (s.Seen.Contains(command.id))
+                {
+                    if (command.type == "profile") SendProfile(s, command.id);
+                    peer.Send(new Envelope { type = "ack", id = command.id,
+                        tableId = command.type == "create" ? s.PendingRoomId ?? command.tableId : null });
+                    if (s.Room != null) peer.Send(new Envelope { type = "state", table = s.Room.View(s, now) });
+                    return;
+                }
                 if (command.type == "profile") UpdateProfile(s, command, now);
                 else if (command.type == "create") CreateTable(s, command, now);
                 else if (command.type == "join") Join(s, command, now);
+                else if (command.type == "cancelCreate")
+                {
+                    if (!CancelPendingCreate(s)) throw new InvalidOperationException("There is no created table reservation to cancel.");
+                }
                 else
                 {
                     var room = s.Room ?? throw new InvalidOperationException("Join a table first.");
@@ -206,6 +236,32 @@ public sealed class Hub
                         room.Game.RecordSeatUpdate(s.Seat, "rebuy");
                         WalletChanged(s);
                         Changed(room, now); LobbyChanged();
+                    }
+                    else if (command.type == "addOn")
+                    {
+                        if (!IsValidChipAmount(command.addOnAmount) || command.addOnAmount <= 0)
+                            throw new ArgumentException("Choose a positive add-on amount with up to two decimal places.");
+                        Player player = room.Game.Players[s.Seat];
+                        float capacity = Math.Max(0, room.MaxBuyIn - player.Stack - s.PendingAddOn);
+                        float amount = RoundChips(Math.Min(command.addOnAmount, Math.Min(capacity, wallets.GetBalance(s.WalletId))));
+                        if (amount <= 0) throw new InvalidOperationException("There is no add-on available for your stack and bank balance.");
+                        s.PendingAddOn = RoundChips(s.PendingAddOn + amount);
+                        room.Game.Note(s.Name + " queued an add-on for the next hand.");
+                        Changed(room, now);
+                    }
+                    else if (command.type == "autoTopUp")
+                    {
+                        if (!IsValidChipAmount(command.autoTopUpBigBlinds) || command.autoTopUpBigBlinds > 1000000
+                            || (command.enabled && !command.alwaysTopUpMax && command.autoTopUpBigBlinds <= 0))
+                            throw new ArgumentException("Auto top-up must use a valid number of big blinds.");
+                        float bigBlinds = RoundChips(command.autoTopUpBigBlinds);
+                        bool alwaysMax = command.enabled && command.alwaysTopUpMax;
+                        wallets.SetAutoTopUp(s.WalletId, bigBlinds, command.enabled, alwaysMax);
+                        s.AutoTopUpEnabled = command.enabled;
+                        s.AutoTopUpBigBlinds = bigBlinds;
+                        s.AlwaysTopUpMax = alwaysMax;
+                        peer.Send(new Envelope { type = "topUpSettings", autoTopUpEnabled = s.AutoTopUpEnabled,
+                            autoTopUpBigBlinds = bigBlinds, alwaysTopUpMax = alwaysMax });
                     }
                     else if (command.type == "lockDraw")
                     {
@@ -277,7 +333,7 @@ public sealed class Hub
                 }
                 s.Seen.Add(command.id); s.Commands.Enqueue(command.id);
                 if (s.Commands.Count > 64) s.Seen.Remove(s.Commands.Dequeue());
-                peer.Send(new Envelope { type = "ack", id = command.id });
+                peer.Send(new Envelope { type = "ack", id = command.id, tableId = command.type == "create" ? command.tableId : null });
             }
             catch (AuditFailureException)
             {
@@ -344,7 +400,7 @@ public sealed class Hub
     static float RoundChips(float amount) => (float)Math.Round(amount, 2, MidpointRounding.AwayFromZero);
     void CreateTable(Session session, Command command, DateTime now)
     {
-        if (session.Room != null) throw new InvalidOperationException("Leave your current table before creating another.");
+        if (session.Room != null || session.PendingRoomId != null) throw new InvalidOperationException("Leave your current table before creating another.");
         if (Rooms.Count >= 100) throw new InvalidOperationException("The server has reached its table limit. Try again later.");
         string name = ValidateTableName(command.tableName);
         ValidateTableSettings(command);
@@ -360,16 +416,24 @@ public sealed class Hub
         Room room = new(id, name, command.smallBlind, command.bigBlind, command.minBuyIn, command.maxBuyIn,
             command.isPublic, codeHash, TimedAudit(auditStore.ForTable(id)));
         Rooms.Add(room);
-        try
-        {
-            Join(session, new Command { tableId = id, entryMode = "wait", buyInAmount = command.minBuyIn,
-                inviteCode = command.inviteCode }, now);
-        }
-        catch
-        {
-            if (session.Room != room) Rooms.Remove(room);
-            throw;
-        }
+        room.ReservedSeats[0] = true;
+        session.PendingRoomId = id; session.PendingSeat = 0; session.PendingRoomExpires = now.AddMinutes(5);
+        command.tableId = id;
+        LobbyChanged();
+        TableState preview = room.View(null, now); preview.buyInReserved = true;
+        session.Peer?.Send(new Envelope { type = "state", table = preview });
+    }
+    bool CancelPendingCreate(Session session)
+    {
+        if (session.PendingRoomId == null) return false;
+        Room room = Rooms.FirstOrDefault(candidate => candidate.Id == session.PendingRoomId);
+        if (room != null && session.PendingSeat >= 0 && session.PendingSeat < room.ReservedSeats.Length)
+            room.ReservedSeats[session.PendingSeat] = false;
+        session.PendingRoomId = null; session.PendingSeat = -1; session.PendingRoomExpires = default;
+        RemoveEmptyRooms();
+        if (room != null) LobbyChanged();
+        session.Peer?.Send(new Envelope { type = "left" });
+        return true;
     }
     static EntryMode ParseEntry(string entry) => entry == "post" ? EntryMode.PostBigBlind : entry == "wait" ? EntryMode.WaitForBigBlind : throw new ArgumentException("Choose post or wait.");
     static void SendChatHistory(Session session) => session.Peer?.Send(new Envelope {
@@ -395,6 +459,8 @@ public sealed class Hub
         if (s.Room != null) throw new InvalidOperationException("Leave your current table first.");
         var entry = ParseEntry(command.entryMode);
         var room = Rooms.FirstOrDefault(r => r.Id == command.tableId) ?? throw new ArgumentException("Unknown table.");
+        if (s.PendingRoomId != null && s.PendingRoomId != room.Id)
+            throw new InvalidOperationException("Accept or cancel your created table before joining another.");
         if (room.Game.Faulted) throw new InvalidOperationException("Table paused: secure hand recording failed.");
         if (!room.IsPublic && !CryptographicOperations.FixedTimeEquals(room.InviteCodeHash, HashInviteCode(ValidateInviteCode(command.inviteCode))))
             throw new InvalidOperationException("Incorrect invite code.");
@@ -403,10 +469,15 @@ public sealed class Hub
         command.buyInAmount = RoundChips(command.buyInAmount);
         if (command.buyInAmount < room.MinBuyIn || command.buyInAmount > room.MaxBuyIn)
             throw new ArgumentException("Choose a buy-in within this table's minimum and maximum.");
-        int seat = -1;
-        for (int i = 0; i < room.Seats.Length; i++) if (room.Seats[i] == null && !room.ReservedSeats[i]) { seat = i; break; }
+        int seat = s.PendingRoomId == room.Id && s.PendingSeat >= 0 && room.ReservedSeats[s.PendingSeat] ? s.PendingSeat : -1;
+        for (int i = 0; seat < 0 && i < room.Seats.Length; i++) if (room.Seats[i] == null && !room.ReservedSeats[i]) { seat = i; break; }
         if (seat < 0) throw new InvalidOperationException("Table is full.");
         wallets.BuyIn(s.WalletId, room.Id, command.buyInAmount);
+        if (s.PendingRoomId == room.Id)
+        {
+            room.ReservedSeats[seat] = false;
+            s.PendingRoomId = null; s.PendingSeat = -1; s.PendingRoomExpires = default;
+        }
         s.Room = room; s.Seat = seat; s.Entry = entry; s.Leaving = s.LeaveRequested = false; s.MissedBig = s.MissedSmall = false;
         s.CheckFold = false; s.AutoCallAmount = -1; s.LockedDrawHand = -1; s.LockedDiscards = null;
         room.Seats[seat] = s; var p = room.Game.Players[seat]; p.Name = s.Name; p.Stack = command.buyInAmount;
@@ -456,6 +527,45 @@ public sealed class Hub
         {
             Session session = room.Seats[seat];
             if (session != null) wallets.CheckpointStack(session.WalletId, room.Id, room.Game.Players[seat].Stack);
+        }
+    }
+    bool CanStartWithQueuedFunding(Room room)
+    {
+        int eligible = 0;
+        for (int seat = 0; seat < room.Seats.Length; seat++)
+        {
+            Session session = room.Seats[seat];
+            if (session?.Peer == null || session.Leaving) continue;
+            Player player = room.Game.Players[seat];
+            if (player.Stack > 0 || (room.MaxBuyIn > player.Stack && wallets.GetBalance(session.WalletId) > 0
+                && (session.PendingAddOn > 0 || session.AutoTopUpEnabled))) eligible++;
+        }
+        return eligible >= 2;
+    }
+    void ApplyQueuedFunding(Room room)
+    {
+        for (int seat = 0; seat < room.Seats.Length; seat++)
+        {
+            Session session = room.Seats[seat];
+            if (session?.Peer == null || session.Leaving) continue;
+            Player player = room.Game.Players[seat];
+            float maximum = Math.Max(0, room.MaxBuyIn - player.Stack);
+            float targetStack = player.Stack + Math.Min(session.PendingAddOn, maximum);
+            if (session.AutoTopUpEnabled)
+            {
+                float target = session.AlwaysTopUpMax ? room.MaxBuyIn
+                    : Math.Min(room.MaxBuyIn, session.AutoTopUpBigBlinds * room.Game.BigBlind);
+                targetStack = Math.Max(targetStack, target);
+            }
+            float amount = RoundChips(Math.Min(Math.Max(0, targetStack - player.Stack),
+                Math.Min(maximum, wallets.GetBalance(session.WalletId))));
+            if (amount <= 0) { session.PendingAddOn = 0; continue; }
+            try { wallets.Rebuy(session.WalletId, room.Id, amount, session.AutoTopUpEnabled ? "auto-top-up" : "add-on"); }
+            catch (InvalidOperationException) { continue; }
+            session.PendingAddOn = 0;
+            player.Stack = RoundChips(player.Stack + amount);
+            room.Game.RecordSeatUpdate(seat, "add-on");
+            WalletChanged(session);
         }
     }
     void WalletChanged(Session session)
@@ -552,6 +662,16 @@ public sealed class Hub
     {
         lock (gate)
         {
+            bool expiredCreate = false;
+            foreach (Session session in sessions.Values.Where(s => s.PendingRoomId != null && s.PendingRoomExpires <= now).ToArray())
+            {
+                Room pendingRoom = Rooms.FirstOrDefault(room => room.Id == session.PendingRoomId);
+                if (pendingRoom != null && session.PendingSeat >= 0 && session.PendingSeat < pendingRoom.ReservedSeats.Length)
+                    pendingRoom.ReservedSeats[session.PendingSeat] = false;
+                session.PendingRoomId = null; session.PendingSeat = -1; session.PendingRoomExpires = default;
+                expiredCreate = true;
+            }
+            if (expiredCreate) { RemoveEmptyRooms(); LobbyChanged(); }
             foreach (var room in Rooms.ToArray())
             {
                 if (room.Game.Faulted) continue;
@@ -577,7 +697,10 @@ public sealed class Hub
                 if (!boundary) continue;
                 bool removed = false;
                 foreach (var s in room.Seats.Where(s => s != null && s.Leaving).ToArray()) { Remove(s); removed = true; }
-                Array.Clear(room.ReservedSeats, 0, room.ReservedSeats.Length);
+                for (int seat = 0; seat < room.ReservedSeats.Length; seat++)
+                    if (!sessions.Values.Any(session => session.PendingRoomId == room.Id && session.PendingSeat == seat && session.PendingRoomExpires > now))
+                        room.ReservedSeats[seat] = false;
+                if (CanStartWithQueuedFunding(room)) ApplyQueuedFunding(room);
                 bool[] available = room.Seats.Select((s, i) => s != null && s.Peer != null && room.Game.Players[i].Stack > 0).ToArray();
                 if (available.Count(player => player) < 2)
                 {
