@@ -211,6 +211,20 @@ public sealed class Hub
                 {
                     if (!CancelPendingCreate(s)) throw new InvalidOperationException("There is no created table reservation to cancel.");
                 }
+                else if (command.type == "autoTopUp")
+                {
+                    if (!IsValidChipAmount(command.autoTopUpBigBlinds) || command.autoTopUpBigBlinds > 1000000
+                        || (command.enabled && !command.alwaysTopUpMax && command.autoTopUpBigBlinds <= 0))
+                        throw new ArgumentException("Auto top-up must use a valid number of big blinds.");
+                    float bigBlinds = RoundChips(command.autoTopUpBigBlinds);
+                    bool alwaysMax = command.enabled && command.alwaysTopUpMax;
+                    wallets.SetAutoTopUp(s.WalletId, bigBlinds, command.enabled, alwaysMax);
+                    s.AutoTopUpEnabled = command.enabled;
+                    s.AutoTopUpBigBlinds = bigBlinds;
+                    s.AlwaysTopUpMax = alwaysMax;
+                    peer.Send(new Envelope { type = "topUpSettings", autoTopUpEnabled = s.AutoTopUpEnabled,
+                        autoTopUpBigBlinds = bigBlinds, alwaysTopUpMax = alwaysMax });
+                }
                 else
                 {
                     var room = s.Room ?? throw new InvalidOperationException("Join a table first.");
@@ -248,20 +262,6 @@ public sealed class Hub
                         s.PendingAddOn = RoundChips(s.PendingAddOn + amount);
                         room.Game.Note(s.Name + " queued an add-on for the next hand.");
                         Changed(room, now);
-                    }
-                    else if (command.type == "autoTopUp")
-                    {
-                        if (!IsValidChipAmount(command.autoTopUpBigBlinds) || command.autoTopUpBigBlinds > 1000000
-                            || (command.enabled && !command.alwaysTopUpMax && command.autoTopUpBigBlinds <= 0))
-                            throw new ArgumentException("Auto top-up must use a valid number of big blinds.");
-                        float bigBlinds = RoundChips(command.autoTopUpBigBlinds);
-                        bool alwaysMax = command.enabled && command.alwaysTopUpMax;
-                        wallets.SetAutoTopUp(s.WalletId, bigBlinds, command.enabled, alwaysMax);
-                        s.AutoTopUpEnabled = command.enabled;
-                        s.AutoTopUpBigBlinds = bigBlinds;
-                        s.AlwaysTopUpMax = alwaysMax;
-                        peer.Send(new Envelope { type = "topUpSettings", autoTopUpEnabled = s.AutoTopUpEnabled,
-                            autoTopUpBigBlinds = bigBlinds, alwaysTopUpMax = alwaysMax });
                     }
                     else if (command.type == "lockDraw")
                     {

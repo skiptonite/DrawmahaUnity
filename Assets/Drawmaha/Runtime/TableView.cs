@@ -31,22 +31,24 @@ namespace Drawmaha
         readonly float[] chipFlightStarted = new float[6];
         readonly Vector2[] positions = { new Vector2(960, 790), new Vector2(405, 565), new Vector2(405, 345), new Vector2(960, 195), new Vector2(1515, 345), new Vector2(1515, 565) };
         readonly Vector2[] betPositions = { new Vector2(960, 628), new Vector2(610, 604), new Vector2(610, 410), new Vector2(960, 327), new Vector2(1310, 410), new Vector2(1310, 604) };
-        GUIStyle text, small, bold, title, button, accentButton, holeOrderTabButton, holeOrderTabAccentButton, input, betAmountStyle, betSliderStyle, betSliderThumbStyle;
+        GUIStyle text, small, bold, title, button, accentButton, input, betAmountStyle, betSliderStyle, betSliderThumbStyle;
+        GUIStyle[] customizationTabButtons, customizationTabAccentButtons;
         const string LocalhostEndpoint = "ws://127.0.0.1:8080/ws";
         const string AzureEndpoint = "wss://drawmaha.blackmushroom-85b81292.centralus.azurecontainerapps.io/ws";
         string endpoint = AzureEndpoint, username = "", error = "", lastTable = "";
-        bool post, showMenu, showHistory, showRules, showSettings, showProfile, hasSavedProfile, profileSaveRequested;
+        bool post, showMenu, showHistory, showRules, showSettings, showAutoTopUpDialog, showProfile, hasSavedProfile, profileSaveRequested;
         bool showCreateTable, showJoinTable, showAddOnDialog, createPublic, createdTableReservation;
         string profileName = "", profileError = "";
         string tableName = "My Table", minBuyInText = "1000", maxBuyInText = "5000";
         string createInviteCode = "", joinInviteCode = "", joinBuyInText = "", addOnAmountText = "", autoTopUpBigBlindsText = "";
-        string tableDialogError = "";
+        string tableDialogError = "", autoTopUpDialogError = "";
         LobbyRow selectedTable;
         int blindStructureIndex, blindStructurePressedIndex = -1;
         bool blindStructureDropdownOpen, blindStructureScrollbarDragging;
         Vector2 blindStructureScroll;
         int profileAvatar;
         bool? optimisticDrawLocked, optimisticCheckFold, optimisticCallQueued;
+        bool? optimisticAutoTopUpEnabled, optimisticAlwaysTopUpMax;
         float optimisticCallAmount = -1;
         Vector2 historyScroll, customizationScroll, tableScroll;
         Vector2 chatScroll;
@@ -57,6 +59,8 @@ namespace Drawmaha
         int lastHand = -1, shownBoard, lastActor = -99, customizationTab;
         float handStarted, nextBoardAt, raiseTo, errorUntil, leaveNoticeUntil, turnTimerStartedAt, turnTimerDuration;
         string leaveNotice = "", raiseAmountText = "", drawHandLabel = "", omahaHandLabel = "";
+        static readonly string[] CustomizationTabs = { "Card Face", "Card Back", "Table", "Background", "Hole Card Order" };
+        const float CustomizationTabWidth = 130;
         TableState previous;
         Color Ink { get { return new Color(0.91f, 0.94f, 0.96f); } }
         Color Dim { get { return new Color(0.53f, 0.64f, 0.68f); } }
@@ -114,7 +118,11 @@ namespace Drawmaha
             network = gameObject.AddComponent<MultiplayerClient>();
             network.StateChanged += Received;
             network.CommandConfirmed += HandleCommandConfirmed;
-            network.TopUpSettingsChanged += () => autoTopUpBigBlindsText = FormatChips(network.AutoTopUpBigBlinds);
+            network.TopUpSettingsChanged += () => {
+                optimisticAutoTopUpEnabled = null; optimisticAlwaysTopUpMax = null;
+                if (string.IsNullOrEmpty(autoTopUpBigBlindsText))
+                    autoTopUpBigBlindsText = FormatChips(network.AutoTopUpBigBlinds);
+            };
             network.ChatConfirmed += sent => { if (chatDraft.Trim() == sent) chatDraft = ""; };
             network.ProfileChanged += () => {
                 username = network.PlayerName; avatarIndex = network.PlayerAvatar; hasSavedProfile = true;
@@ -130,6 +138,7 @@ namespace Drawmaha
             network.Failure += s => {
                 ClearOptimisticPreferences(); error = s; errorUntil = Time.unscaledTime + 8;
                 if (showCreateTable || showJoinTable || showAddOnDialog) tableDialogError = s;
+                if (showAutoTopUpDialog) autoTopUpDialogError = s;
                 if (profileSaveRequested) { profileError = s; profileSaveRequested = false; }
             };
 #if UNITY_EDITOR
@@ -437,9 +446,15 @@ namespace Drawmaha
             accentButton.onFocused.background = accentNormal;
             accentButton.onNormal.textColor = Ink; accentButton.onHover.textColor = Color.white;
             accentButton.onActive.textColor = Color.white; accentButton.onFocused.textColor = Ink;
-            holeOrderTabButton = new GUIStyle(button);
-            holeOrderTabButton.fontSize = FitButtonFontSize(holeOrderTabButton, "Hole Card Order", 154);
-            holeOrderTabAccentButton = new GUIStyle(accentButton) { fontSize = holeOrderTabButton.fontSize };
+            customizationTabButtons = new GUIStyle[CustomizationTabs.Length];
+            customizationTabAccentButtons = new GUIStyle[CustomizationTabs.Length];
+            for (int i = 0; i < CustomizationTabs.Length; i++)
+            {
+                customizationTabButtons[i] = new GUIStyle(button)
+                { fontSize = FitButtonFontSize(button, CustomizationTabs[i], CustomizationTabWidth) };
+                customizationTabAccentButtons[i] = new GUIStyle(accentButton)
+                { fontSize = customizationTabButtons[i].fontSize };
+            }
             input = new GUIStyle(GUI.skin.textField); input.fontSize = 19; input.padding = new RectOffset(12, 12, 10, 8);
             chatText = Style(16, Ink); chatText.clipping = TextClipping.Clip;
             chatMeta = Style(14, Accent, FontStyle.Bold);
@@ -483,7 +498,9 @@ namespace Drawmaha
             if (BackgroundImage != null) GUI.DrawTexture(new Rect(0, 0, W, H), BackgroundImage, ScaleMode.ScaleAndCrop, true);
             bool needsRebuy = currentTable != null && currentTable.yourSeat >= 0 && currentTable.yourSeat < currentTable.players.Length
                 && currentTable.players[currentTable.yourSeat].needsRebuy;
-            bool wasEnabled = GUI.enabled; GUI.enabled = !showRules && !showHistory && !showSettings && !showProfile && !showCreateTable && !showJoinTable && !needsRebuy;
+            bool wasEnabled = GUI.enabled;
+            GUI.enabled = wasEnabled && !showRules && !showHistory && !showSettings && !showProfile
+                && !showCreateTable && !showJoinTable && !showAddOnDialog && !showAutoTopUpDialog && !needsRebuy;
             Rect menuButton = new Rect(24, 24, 56, 56);
             if (GUI.Button(menuButton, new GUIContent("", showMenu ? "Close menu" : "Open menu"), button)) showMenu = !showMenu;
             Fill(new Rect(39, 39, 26, 3), Ink, white);
@@ -513,7 +530,8 @@ namespace Drawmaha
             else
             {
                 if (showRules) Rules(); if (showHistory) History(); if (showSettings) Settings();
-                if (showAddOnDialog) AddOnDialog();
+                if (showAutoTopUpDialog) AutoTopUpDialog();
+                else if (showAddOnDialog) AddOnDialog();
             }
             GUI.matrix = old;
         }
@@ -543,13 +561,25 @@ namespace Drawmaha
         {
             bool atTable = currentTable != null && currentTable.yourSeat >= 0
                 && currentTable.yourSeat < currentTable.players.Length;
-            Fill(new Rect(24, 90, 270, atTable ? 250 : 138), Panel, rounded);
+            Fill(new Rect(24, 90, 270, atTable ? 356 : 250), Panel, rounded);
             if (Button(new Rect(38, 102, 242, 48), "Customization")) { showSettings = true; showMenu = false; }
-            if (Button(new Rect(38, 158, 242, 48), "Rules")) { showRules = true; showMenu = false; }
+            if (Button(new Rect(38, 158, 242, 48), "Add on Chips", atTable && network.Connected && !network.CommandPending))
+            {
+                addOnAmountText = FormatChips(MaximumAddOn(currentTable));
+                tableDialogError = ""; showSettings = false; showAutoTopUpDialog = false;
+                showAddOnDialog = true; showMenu = false;
+            }
+            if (Button(new Rect(38, 214, 242, 48), "Auto Top Up"))
+            {
+                autoTopUpBigBlindsText = FormatChips(network.AutoTopUpBigBlinds);
+                autoTopUpDialogError = ""; showSettings = false; showAddOnDialog = false;
+                showAutoTopUpDialog = true; showMenu = false;
+            }
+            if (Button(new Rect(38, 270, 242, 48), "Rules")) { showRules = true; showMenu = false; }
             if (atTable)
             {
-                if (Button(new Rect(38, 214, 242, 48), "History")) { showHistory = true; showMenu = false; }
-                if (Button(new Rect(38, 270, 242, 48), "Leave Table"))
+                if (Button(new Rect(38, 326, 242, 48), "History")) { showHistory = true; showMenu = false; }
+                if (Button(new Rect(38, 382, 242, 48), "Leave Table"))
                 {
                     network.Send(new Command { type = "leave" }); showMenu = false;
                 }
@@ -770,10 +800,35 @@ namespace Drawmaha
             Label(600, buyInY, 640, 24, "Buy-in", small);
             float sliderMax = Mathf.Max(min, Mathf.Min(max, network.BankBalance));
             float currentAmount = TryParseChips(joinBuyInText, out float parsedAmount) ? parsedAmount : min;
-            float sliderAmount = GUI.HorizontalSlider(new Rect(600, buyInY + 48, 450, 22), Mathf.Clamp(currentAmount, min, sliderMax),
+            float sliderStartAmount = Mathf.Clamp(currentAmount, min, sliderMax);
+            Rect sliderRect = new Rect(600, buyInY + 48, 450, 22);
+            Rect amountRect = new Rect(1080, buyInY + 32, 260, 48);
+            const string buyInControlName = "DrawmahaJoinBuyInAmount";
+            bool focusedBefore = GUI.GetNameOfFocusedControl() == buyInControlName;
+            bool clickAway = focusedBefore && Event.current.type == EventType.MouseDown
+                && !amountRect.Contains(Event.current.mousePosition);
+            float sliderAmount = GUI.HorizontalSlider(sliderRect, sliderStartAmount,
                 min, sliderMax, betSliderStyle, betSliderThumbStyle);
-            if (!Mathf.Approximately(sliderAmount, currentAmount)) joinBuyInText = FormatChips(sliderAmount);
-            joinBuyInText = GUI.TextField(new Rect(1080, buyInY + 32, 260, 48), joinBuyInText, 12, input);
+            bool sliderChanged = !Mathf.Approximately(sliderAmount, sliderStartAmount);
+            GUI.SetNextControlName(buyInControlName);
+            joinBuyInText = GUI.TextField(amountRect, joinBuyInText, 12, input);
+            bool focusedAfter = GUI.GetNameOfFocusedControl() == buyInControlName;
+            bool enter = focusedAfter && Event.current.type == EventType.KeyDown
+                && (Event.current.keyCode == KeyCode.Return || Event.current.keyCode == KeyCode.KeypadEnter);
+            if (sliderChanged)
+            {
+                joinBuyInText = FormatChips(Mathf.Clamp((float)Mathf.RoundToInt(sliderAmount), min, sliderMax));
+                GUI.FocusControl(null);
+            }
+            else if (clickAway || enter || (focusedBefore && !focusedAfter))
+            {
+                float committedAmount = TryParseChips(joinBuyInText.Trim(), out float enteredAmount)
+                    ? Mathf.Clamp(enteredAmount, min, sliderMax)
+                    : sliderStartAmount;
+                joinBuyInText = FormatChips(committedAmount);
+                GUI.FocusControl(null);
+                if (enter) Event.current.Use();
+            }
             if (selectedTable != null) Label(600, buyInY + 82, 740, 24,
                 "Choose " + FormatChips(min) + "–" + FormatChips(max) + " chips; the slider is limited by your bank.", Style(14, Dim));
             if (!string.IsNullOrEmpty(tableDialogError)) Label(600, 630, 740, 44, tableDialogError, Style(15, new Color(1f, 0.55f, 0.48f)));
@@ -1411,20 +1466,22 @@ namespace Drawmaha
         void ClearOptimisticPreferences()
         {
             optimisticDrawLocked = null; optimisticCheckFold = null; optimisticCallQueued = null;
+            optimisticAutoTopUpEnabled = null; optimisticAlwaysTopUpMax = null;
             optimisticCallAmount = -1;
         }
         bool PreferenceButton(Rect rect, string label, bool isChecked, bool enabled, out bool nextChecked)
         {
             bool wasEnabled = GUI.enabled;
             GUI.enabled = wasEnabled && enabled;
-            nextChecked = GUI.Toggle(rect, isChecked, GUIContent.none, accentButton);
+            bool clicked = GUI.Button(rect, GUIContent.none, accentButton);
             GUI.enabled = wasEnabled;
+            nextChecked = clicked ? !isChecked : isChecked;
             Rect check = new Rect(rect.x + 14, rect.center.y - 12, 24, 24);
             Fill(new Rect(check.x - 2, check.y - 2, check.width + 4, check.height + 4), new Color(0.72f, 0.78f, 0.80f));
             Fill(check, nextChecked ? Accent : new Color(0.025f, 0.045f, 0.065f));
             if (nextChecked) Label(check.x, check.y - 1, check.width, check.height, "✓", Style(18, Color.white, FontStyle.Bold, TextAnchor.MiddleCenter));
             Label(rect.x + 48, rect.y, rect.width - 56, rect.height, label, Style(17, Ink, FontStyle.Bold, TextAnchor.MiddleCenter));
-            return nextChecked != isChecked;
+            return clicked;
         }
         static bool IsBettingStage(string stage)
         {
@@ -1569,22 +1626,14 @@ namespace Drawmaha
             Matrix4x4 oldMatrix = GUI.matrix;
             GUI.matrix = oldMatrix * Matrix4x4.Translate(new Vector3(160, 40, 0));
             Overlay("CUSTOMIZATION");
-            string[] tabs = { "Card Face", "Card Back", "Table", "Background", "Hole Card Order", "Chips" };
-            const float tabWidth = 130, tabGap = 4;
-            for (int i = 0; i < tabs.Length; i++)
+            customizationTab = Mathf.Clamp(customizationTab, 0, CustomizationTabs.Length - 1);
+            const float tabGap = 4;
+            for (int i = 0; i < CustomizationTabs.Length; i++)
             {
-                Rect tab = new Rect(394 + i * (tabWidth + tabGap), 258, tabWidth, 48);
+                Rect tab = new Rect(394 + i * (CustomizationTabWidth + tabGap), 258, CustomizationTabWidth, 48);
                 bool selectedTab = customizationTab == i;
-                bool clicked;
-                if (i == 4)
-                {
-                    bool wasEnabled = GUI.enabled;
-                    GUI.enabled = wasEnabled;
-                    clicked = GUI.Button(tab, tabs[i], selectedTab ? holeOrderTabAccentButton : holeOrderTabButton);
-                    GUI.enabled = wasEnabled;
-                }
-                else clicked = Button(tab, tabs[i], true, selectedTab);
-                if (clicked)
+                GUIStyle tabStyle = selectedTab ? customizationTabAccentButtons[i] : customizationTabButtons[i];
+                if (GUI.Button(tab, CustomizationTabs[i], tabStyle))
                 { customizationTab = i; customizationScroll = Vector2.zero; }
             }
             DrawCustomizationGrid();
@@ -1593,11 +1642,6 @@ namespace Drawmaha
         }
         void DrawCustomizationGrid()
         {
-            if (customizationTab == 5)
-            {
-                DrawChipSettings();
-                return;
-            }
             if (customizationTab == 4)
             {
                 DrawHoleCardOrderSetting();
@@ -1676,59 +1720,109 @@ namespace Drawmaha
             }
             GUI.EndScrollView();
         }
-        void DrawChipSettings()
+        void AutoTopUpDialog()
         {
-            customizationScroll = GUI.BeginScrollView(new Rect(394, 318, 812, 430), customizationScroll,
-                new Rect(0, 0, 812, 456));
-            Label(20, 20, 760, 38, "CHIPS", Style(20, Ink, FontStyle.Bold));
+            Fill(new Rect(0, 0, W, H), new Color(0, 0, 0, 0.68f));
+            Rect panel = new Rect(440, 220, 1040, 640); Fill(panel, Panel, rounded);
+            Label(panel.x + 56, panel.y + 36, 780, 46, "AUTO TOP-UP", Style(29, Ink, FontStyle.Bold));
+            if (Button(new Rect(panel.xMax - 92, panel.y + 28, 54, 48), "X"))
+            {
+                showAutoTopUpDialog = false;
+                GUI.FocusControl(null);
+            }
+
             TableState table = CurrentTable;
             bool seated = table != null && table.yourSeat >= 0 && table.yourSeat < table.players.Length;
-            if (seated)
-            {
-                SeatView player = table.players[table.yourSeat];
-                Label(24, 66, 740, 28, "Stack: " + FormatChips(player.stack)
-                    + "  ·  Available in main bank: " + FormatChips(network.BankBalance), small);
-                if (player.pendingAddOn > 0)
-                    Label(24, 98, 740, 26, "Add-on queued for next hand: " + FormatChips(player.pendingAddOn), Style(15, Accent));
-                float addOnMax = Mathf.Min(network.BankBalance, Mathf.Max(0, table.maxBuyIn - player.stack - player.pendingAddOn));
-                if (Button(new Rect(24, 130, 230, 50), "Add-on", addOnMax > 0 && network.Connected && !network.CommandPending, true))
-                {
-                    addOnAmountText = FormatChips(addOnMax); tableDialogError = ""; showAddOnDialog = true;
-                }
-            }
-            else Label(24, 66, 740, 28, "Join a table before adding on or configuring auto top-up.", small);
+            bool supported = network.SupportsAutoTopUp;
+            bool canEdit = network.Connected && supported && !network.CommandPending;
+            Label(panel.x + 56, panel.y + 100, 900, 32, seated
+                ? "Main bank: " + FormatChips(network.BankBalance) + " chips"
+                : "These wallet settings can be configured before joining a table.", small);
+            if (!supported)
+                Label(panel.x + 56, panel.y + 132, 900, 30, "Update the server to enable auto top-up.", Style(14, new Color(1f, 0.55f, 0.48f)));
 
-            Label(24, 202, 740, 28, "AUTO TOP-UP", Style(17, Ink, FontStyle.Bold));
-            bool autoEnabled = network.AutoTopUpEnabled;
-            bool alwaysMax = network.AlwaysTopUpMax;
-            if (PreferenceButton(new Rect(24, 238, 350, 48), "Auto top-up", autoEnabled,
-                seated && network.Connected && !network.CommandPending, out bool nextEnabled))
-                SendAutoTopUpSettings(nextEnabled, network.AutoTopUpBigBlinds, alwaysMax);
-
-            Label(24, 300, 300, 24, "Top-up threshold (big blinds)", Style(14, Dim));
-            const string topUpControlName = "DrawmahaAutoTopUpBigBlinds";
-            if (GUI.GetNameOfFocusedControl() != topUpControlName)
-                autoTopUpBigBlindsText = FormatChips(network.AutoTopUpBigBlinds);
-            GUI.SetNextControlName(topUpControlName);
-            autoTopUpBigBlindsText = GUI.TextField(new Rect(24, 328, 300, 48), autoTopUpBigBlindsText, 12, input);
-            if (PreferenceButton(new Rect(390, 238, 390, 48), "Always top up to the max", alwaysMax,
-                seated && autoEnabled && network.Connected && !network.CommandPending, out bool nextAlwaysMax))
-                SendAutoTopUpSettings(autoEnabled, network.AutoTopUpBigBlinds, nextAlwaysMax);
-            if (Button(new Rect(390, 328, 300, 48), "Save top-up settings",
-                seated && network.Connected && !network.CommandPending, true))
+            bool autoEnabled = optimisticAutoTopUpEnabled ?? network.AutoTopUpEnabled;
+            bool alwaysMax = optimisticAlwaysTopUpMax ?? network.AlwaysTopUpMax;
+            if (PreferenceButton(new Rect(panel.x + 56, panel.y + 158, 410, 54), "Auto top-up",
+                autoEnabled, canEdit, out bool nextEnabled))
             {
-                if (!TryParseChips(autoTopUpBigBlindsText, out float bigBlinds) || bigBlinds > 1000000)
-                    tableDialogError = "Enter a valid top-up threshold in big blinds.";
-                else
+                if (TryReadAutoTopUpBigBlinds(out float bigBlinds)
+                    && (!nextEnabled || alwaysMax || bigBlinds > 0))
                 {
-                    tableDialogError = "";
+                    autoTopUpDialogError = "";
+                    autoEnabled = nextEnabled;
+                    if (!autoEnabled) alwaysMax = false;
+                    optimisticAutoTopUpEnabled = autoEnabled;
+                    optimisticAlwaysTopUpMax = alwaysMax;
                     SendAutoTopUpSettings(autoEnabled, bigBlinds, alwaysMax);
                 }
+                else if (string.IsNullOrEmpty(autoTopUpDialogError))
+                    autoTopUpDialogError = "Enter a positive threshold unless always topping up to the max.";
             }
-            if (!string.IsNullOrEmpty(tableDialogError))
-                Label(24, 386, 740, 28, tableDialogError, Style(14, new Color(1f, 0.55f, 0.48f)));
-            Label(24, 414, 740, 28, "Top-ups are withdrawn from your bank before the next hand.", Style(14, Dim));
-            GUI.EndScrollView();
+            if (PreferenceButton(new Rect(panel.x + 520, panel.y + 158, 464, 54), "Always top up to the max",
+                alwaysMax, canEdit && autoEnabled, out bool nextAlwaysMax))
+            {
+                if (TryReadAutoTopUpBigBlinds(out float bigBlinds)
+                    && (!autoEnabled || nextAlwaysMax || bigBlinds > 0))
+                {
+                    autoTopUpDialogError = "";
+                    alwaysMax = nextAlwaysMax;
+                    optimisticAutoTopUpEnabled = autoEnabled;
+                    optimisticAlwaysTopUpMax = alwaysMax;
+                    SendAutoTopUpSettings(autoEnabled, bigBlinds, alwaysMax);
+                }
+                else if (string.IsNullOrEmpty(autoTopUpDialogError))
+                    autoTopUpDialogError = "Enter a positive threshold unless always topping up to the max.";
+            }
+
+            Label(panel.x + 56, panel.y + 260, 430, 26, "Top-up threshold (big blinds)", Style(14, Dim));
+            const string topUpControlName = "DrawmahaAutoTopUpBigBlinds";
+            bool wasEnabled = GUI.enabled;
+            GUI.enabled = wasEnabled && network.Connected && supported;
+            GUI.SetNextControlName(topUpControlName);
+            autoTopUpBigBlindsText = GUI.TextField(
+                new Rect(panel.x + 56, panel.y + 292, 360, 52), autoTopUpBigBlindsText, 12, input);
+            GUI.enabled = wasEnabled;
+            if (Button(new Rect(panel.x + 520, panel.y + 292, 300, 52), "Save top-up settings", canEdit, true))
+            {
+                if (TryReadAutoTopUpBigBlinds(out float bigBlinds)
+                    && (!autoEnabled || alwaysMax || bigBlinds > 0))
+                {
+                    autoTopUpDialogError = "";
+                    autoTopUpBigBlindsText = FormatChips(bigBlinds);
+                    optimisticAutoTopUpEnabled = autoEnabled;
+                    optimisticAlwaysTopUpMax = alwaysMax;
+                    SendAutoTopUpSettings(autoEnabled, bigBlinds, alwaysMax);
+                }
+                else if (string.IsNullOrEmpty(autoTopUpDialogError))
+                    autoTopUpDialogError = "Enter a positive threshold unless always topping up to the max.";
+            }
+            if (!string.IsNullOrEmpty(autoTopUpDialogError))
+                Label(panel.x + 56, panel.y + 370, 920, 34, autoTopUpDialogError, Style(14, new Color(1f, 0.55f, 0.48f)));
+            Label(panel.x + 56, panel.y + 426, 920, 30,
+                "Top-ups are withdrawn from your bank before the next hand.", Style(14, Dim));
+            if (!network.Connected)
+                Label(panel.x + 56, panel.y + 464, 920, 30, "Connect to save auto top-up settings.", Style(14, Dim));
+            if (Button(new Rect(panel.x + 56, panel.yMax - 82, 240, 48), "Back to game"))
+            {
+                showAutoTopUpDialog = false;
+                GUI.FocusControl(null);
+            }
+        }
+        bool TryReadAutoTopUpBigBlinds(out float bigBlinds)
+        {
+            if (!TryParseChips(autoTopUpBigBlindsText, out bigBlinds) || bigBlinds > 1000000)
+            {
+                autoTopUpDialogError = "Enter a valid top-up threshold in big blinds.";
+                return false;
+            }
+            return true;
+        }
+        float MaximumAddOn(TableState table)
+        {
+            if (table == null || table.yourSeat < 0 || table.yourSeat >= table.players.Length) return 0;
+            SeatView player = table.players[table.yourSeat];
+            return Mathf.Min(network.BankBalance, Mathf.Max(0, table.maxBuyIn - player.stack - player.pendingAddOn));
         }
         void SendAutoTopUpSettings(bool enabled, float bigBlinds, bool alwaysMax)
         {
@@ -1741,8 +1835,7 @@ namespace Drawmaha
             if (table == null || table.yourSeat < 0 || table.yourSeat >= table.players.Length)
             { showAddOnDialog = false; return; }
             SeatView player = table.players[table.yourSeat];
-            float maximum = Mathf.Min(network.BankBalance,
-                Mathf.Max(0, table.maxBuyIn - player.stack - player.pendingAddOn));
+            float maximum = MaximumAddOn(table);
             float entered = TryParseChips(addOnAmountText, out float parsed) ? parsed : maximum;
             Fill(new Rect(0, 0, W, H), new Color(0, 0, 0, 0.68f));
             Rect panel = new Rect(540, 270, 840, 540); Fill(panel, Panel, rounded);
@@ -1750,19 +1843,27 @@ namespace Drawmaha
             Label(600, 362, 740, 28, "Current stack: " + FormatChips(player.stack)
                 + "  ·  Main bank: " + FormatChips(network.BankBalance), small);
             Label(600, 410, 740, 28, "Maximum available add-on: " + FormatChips(maximum), small);
-            float sliderValue = GUI.HorizontalSlider(new Rect(600, 468, 450, 22), Mathf.Clamp(entered, 0, maximum),
-                0, maximum, betSliderStyle, betSliderThumbStyle);
-            if (!Mathf.Approximately(sliderValue, entered)) addOnAmountText = FormatChips(sliderValue);
             const string addOnControlName = "DrawmahaAddOnAmount";
+            Rect sliderRect = new Rect(600, 468, 450, 22);
+            Rect amountRect = new Rect(1080, 450, 260, 48);
             bool focusedBefore = GUI.GetNameOfFocusedControl() == addOnControlName;
             bool clickAway = focusedBefore && Event.current.type == EventType.MouseDown
-                && !new Rect(1080, 450, 260, 48).Contains(Event.current.mousePosition);
+                && !amountRect.Contains(Event.current.mousePosition);
+            float sliderStartAmount = Mathf.Clamp(entered, 0, maximum);
+            float sliderValue = GUI.HorizontalSlider(sliderRect, sliderStartAmount, 0, maximum,
+                betSliderStyle, betSliderThumbStyle);
+            bool sliderChanged = !Mathf.Approximately(sliderValue, sliderStartAmount);
             GUI.SetNextControlName(addOnControlName);
-            addOnAmountText = GUI.TextField(new Rect(1080, 450, 260, 48), addOnAmountText, 12, input);
+            addOnAmountText = GUI.TextField(amountRect, addOnAmountText, 12, input);
             bool focusedAfter = GUI.GetNameOfFocusedControl() == addOnControlName;
             bool enter = focusedAfter && Event.current.type == EventType.KeyDown
                 && (Event.current.keyCode == KeyCode.Return || Event.current.keyCode == KeyCode.KeypadEnter);
-            if (clickAway || enter || (focusedBefore && !focusedAfter))
+            if (sliderChanged)
+            {
+                addOnAmountText = FormatChips(Mathf.Clamp(sliderValue, 0, maximum));
+                GUI.FocusControl(null);
+            }
+            else if (clickAway || enter || (focusedBefore && !focusedAfter))
             {
                 float value = TryParseChips(addOnAmountText, out float typed) ? typed : maximum;
                 addOnAmountText = FormatChips(Mathf.Clamp(value, 0, maximum));
@@ -1770,11 +1871,10 @@ namespace Drawmaha
                 if (enter) Event.current.Use();
             }
             if (!string.IsNullOrEmpty(tableDialogError)) Label(600, 520, 740, 36, tableDialogError, Style(14, new Color(1f, 0.55f, 0.48f)));
+            bool validAmount = TryParseChips(addOnAmountText, out float amount) && amount > 0;
             if (Button(new Rect(1040, 710, 300, 58), "Queue for next hand",
-                network.Connected && !network.CommandPending && maximum > 0
-                    && TryParseChips(addOnAmountText, out float amount) && amount > 0, true))
+                network.Connected && !network.CommandPending && maximum > 0 && validAmount, true))
             {
-                float.TryParse(addOnAmountText, NumberStyles.Float, CultureInfo.InvariantCulture, out float amount);
                 network.Send(new Command { type = "addOn", addOnAmount = Mathf.Clamp(amount, 0, maximum) });
             }
             if (Button(new Rect(600, 710, 300, 58), "Cancel", !network.CommandPending)) showAddOnDialog = false;
